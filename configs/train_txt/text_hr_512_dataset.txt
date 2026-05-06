@@ -1,0 +1,1 @@
+configs/train_txt/text_hr_512_images.txt, 1

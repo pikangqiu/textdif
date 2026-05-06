@@ -5,9 +5,20 @@ import glob
 import math
 import yaml
 import random
+import sys
 from collections import OrderedDict
 import torch
 import torch.nn.functional as F
+
+try:
+    import torchvision.transforms._functional_tensor as _functional_tensor
+
+    sys.modules.setdefault(
+        "torchvision.transforms.functional_tensor",
+        _functional_tensor,
+    )
+except Exception:
+    pass
 
 from basicsr.data.transforms import augment
 from basicsr.data.degradations import circular_lowpass_kernel, random_mixed_kernels

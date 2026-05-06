@@ -1,0 +1,93 @@
+train_dataset_config: configs/train_txt/text_hr_512_dataset.txt
+suffix: '_text_hr'
+
+# Evaluation is effectively disabled by inference_steps: 1 below.
+# Keep these paths as placeholders; they are not used unless inference_steps is changed.
+test_lq_dir: /data/ywk/datasets/real_test/LQ
+test_gt_dir: /data/ywk/datasets/real_test/HR
+test_upscale: 4
+
+infer_steps: 25
+resolution: 512
+
+# For 4x RTX 4090: global batch 4 means per-GPU batch 1.
+# gradient_accumulation_steps: 2 gives effective batch 8.
+train_batch_size: 4
+gradient_accumulation_steps: 2
+dataloader_num_workers: 4
+
+# Model configuration
+patch_size: 2
+mlp_ratio: 4
+use_qknorm: True
+use_swiglu: True
+use_rope: True
+use_rmsnorm: True
+wo_shift: False
+
+dim: 1024
+depth: 28
+num_heads: 16
+
+# bitsandbytes in this environment reported no GPU support, so keep AdamW.
+use_8bit_adam: False
+
+# AE
+ae_type: sd2
+ae_path: preset/ckpts/stable-diffusion-2-1-base
+lwdecoder_path: preset/ckpts/sd21_lwdecoder.pth
+
+# Training configuration
+learning_rate: 1.0e-5
+max_train_steps: 40000
+checkpointing_steps: 1000
+inference_steps: 1
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 1.0e-2
+adam_epsilon: 1.0e-08
+max_grad_norm: 1.0
+lr_scheduler: constant_with_warmup
+lr_warmup_steps: 0
+lr_num_cycles: 1
+use_ema: True
+mixed_precision: bf16
+tracker_project_name: vosr_text_0.5B_40k
+seed: 42
+ema_decay: 0.9999
+
+time_dist: ['uniform', 0, 1.0]
+
+cfg_ratio: 0.1
+cfg_scale: 0.5
+
+weak_cond_strength_aelq_list: [0.05, 0.25]
+cond_strength_aelq_list: [5, 1]
+
+dinov2_size: 448
+enc_type: dinov2b
+enc_dim: 768
+layer_dinov2b_list: [8]
+
+interp_type: lin
+
+a: 1.0
+b: 1.0
+
+use_pos: False
+train_steps: 2
+encdim_ratio: 3
+t_start: 0
+t_end: 1
+
+resume_ckpt: ~
+pretrained_ckpt: preset/ckpts/VOSR_0.5B_ms/checkpoints/ema_model.safetensors
+
+# logging
+logging_dir: logs
+output_dir: exp_vosr_text/
+report_to: tensorboard
+log_loss_steps: 10
+
+dataset_type: 'txt'
+shuffle_buffer: 2000

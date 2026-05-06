@@ -25,6 +25,16 @@ my_torch_cache_root = 'preset/ckpts/torch_cache'
 os.makedirs(my_torch_cache_root, exist_ok=True)
 torch.hub.set_dir(my_torch_cache_root)
 import torchvision
+import sys
+try:
+    import torchvision.transforms._functional_tensor as _functional_tensor
+
+    sys.modules.setdefault(
+        "torchvision.transforms.functional_tensor",
+        _functional_tensor,
+    )
+except Exception:
+    pass
 from torchvision import transforms
 from torchvision.transforms import Normalize
 from PIL import Image
@@ -460,6 +470,7 @@ def main(config_path):
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
+        use_checkpoint=getattr(args, "teacher_use_checkpoint", False),
     )
 
     tea_ckpt_path = getattr(args, 'teacher_ckpt', None)
@@ -500,6 +511,7 @@ def main(config_path):
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
+        use_checkpoint=getattr(args, "use_checkpoint", False),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -578,8 +590,10 @@ def main(config_path):
         if local_batch_size * accelerator.num_processes * args.gradient_accumulation_steps != args.train_batch_size * args.gradient_accumulation_steps:
             logger.warning(f"  ⚠️ WARNING: Batch size mismatch! This may cause training issues.")
     
-    num_workers = args.dataloader_num_workers
-    prefetch_factor = 4 if args.dataloader_num_workers > 0 else None
+    num_workers = getattr(args, "dataloader_num_workers", 0)
+    pin_memory = getattr(args, "dataloader_pin_memory", True)
+    persistent_workers = getattr(args, "dataloader_persistent_workers", num_workers > 0)
+    prefetch_factor = getattr(args, "dataloader_prefetch_factor", 4 if num_workers > 0 else None)
     
     # Create dataset
     if args.dataset_type == 'txt':
@@ -589,9 +603,9 @@ def main(config_path):
             batch_size=local_batch_size,
             shuffle=True,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=pin_memory,
             drop_last=True,
-            persistent_workers=True if num_workers > 0 else False,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
             prefetch_factor=prefetch_factor
         )
     elif args.dataset_type == 'webdataset':
@@ -602,11 +616,11 @@ def main(config_path):
             train_dataset,
             batch_size=local_batch_size,
             shuffle=False,  # IterableDataset
-            num_workers=args.dataloader_num_workers,
-            pin_memory=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
             drop_last=True,
-            persistent_workers=True if args.dataloader_num_workers > 0 else False,
-            prefetch_factor=4,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
+            prefetch_factor=prefetch_factor,
             collate_fn=filter_collate_fn,
         )
     
@@ -952,7 +966,8 @@ def main(config_path):
                 }
                 progress_bar.set_postfix(**logs)
                 
-            if accelerator.is_main_process and global_step % 250 == 0:
+            log_loss_steps = getattr(args, "log_loss_steps", 250)
+            if accelerator.sync_gradients and accelerator.is_main_process and global_step % log_loss_steps == 0:
                 logs = {
                     "loss": loss.detach().item(), 
                     "lr": lr_scheduler.get_last_lr()[0], 

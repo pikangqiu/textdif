@@ -13,6 +13,9 @@ env/
 logs/
 wandb/
 exp_vosr/
+exp_vosr_text/
+exp_vosr_text_distill/
+exp_vosr_text_distill_ablation/
 preset/ckpts/
 preset/datasets/ScreenSR/
 preset/results/

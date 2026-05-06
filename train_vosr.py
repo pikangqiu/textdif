@@ -25,6 +25,16 @@ my_torch_cache_root = 'preset/ckpts/torch_cache'
 os.makedirs(my_torch_cache_root, exist_ok=True)
 torch.hub.set_dir(my_torch_cache_root)
 import torchvision
+import sys
+try:
+    import torchvision.transforms._functional_tensor as _functional_tensor
+
+    sys.modules.setdefault(
+        "torchvision.transforms.functional_tensor",
+        _functional_tensor,
+    )
+except Exception:
+    pass
 from torchvision import transforms
 from torchvision.transforms import Normalize
 from PIL import Image
@@ -435,6 +445,7 @@ def main(config_path):
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
+        use_checkpoint=getattr(args, "use_checkpoint", False),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -871,7 +882,8 @@ def main(config_path):
                 }
                 progress_bar.set_postfix(**logs)
                 
-            if accelerator.is_main_process and global_step % 250 == 0:
+            log_loss_steps = getattr(args, "log_loss_steps", 250)
+            if accelerator.sync_gradients and accelerator.is_main_process and global_step % log_loss_steps == 0:
                 logs = {
                     "loss": loss.detach().item(), 
                     "lr": lr_scheduler.get_last_lr()[0], 
