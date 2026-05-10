@@ -52,11 +52,17 @@ class VOSR(nn.Module):
         self.cfg_scale   = cfg_scale
         self.args = args
         self.u_weight = u_weight
-        self.device = accelerator.device
+        self.device = accelerator.device if accelerator is not None else None
         self.a = a
         self.b = b
         self.t_start = t_start
         self.t_end = t_end
+
+    @staticmethod
+    def _split_model_output(output):
+        if isinstance(output, tuple):
+            return output
+        return output, None
 
 
 
@@ -165,7 +171,7 @@ class VOSR(nn.Module):
         loss = (v_error ** 2).mean()
         return loss, loss
 
-    def loss_fm_distill_shortcut_improved(self, model, lq, hq, z=None, model_tea=None):
+    def loss_fm_distill_shortcut_improved(self, model, lq, hq, z=None, model_tea=None, return_aux=False):
         B, device = hq.size(0), hq.device
         t, r = self.sample_t_r_v1(B, device)
         t_ = rearrange(t, "b -> b 1 1 1")
@@ -183,7 +189,10 @@ class VOSR(nn.Module):
 
         v = self._teacher_target(model, model_tea, t, t_, lq_noised, lq_weak, z_t, z_noised, z_weak, z_mixed, v_target)
 
-        v_current = model(inp_mixed, t=t, r=t, z=z_mixed)
+        return_hidden_at = getattr(self.args, "repa_layer", None) if return_aux else None
+        v_current, student_hidden = self._split_model_output(
+            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at)
+        )
         v_loss = ((v_current - v) ** 2).mean()
 
         with torch.no_grad():
@@ -201,6 +210,8 @@ class VOSR(nn.Module):
         u_loss = ((u_current - stopgrad(integral_approx)) ** 2).mean()
 
         loss = v_loss + self.u_weight * u_loss
+        if return_aux:
+            return loss, loss, {"student_hidden": student_hidden}
         return loss, loss
 
     def _rcgm_consistency(self, model, rng_state, inp_mixed, lq_mixed, z_t, z_mixed, t, r, t_, r_, v, DELTA_T, RCGM_N):
@@ -242,7 +253,7 @@ class VOSR(nn.Module):
         u_loss = ((u_current - stopgrad(rcgm_target)) ** 2).mean()
         return u_loss
 
-    def loss_fm_distill_rcgm_improved(self, model, lq, hq, z=None, model_tea=None):
+    def loss_fm_distill_rcgm_improved(self, model, lq, hq, z=None, model_tea=None, return_aux=False):
         B, device = hq.size(0), hq.device
         DELTA_T = getattr(self.args, 'rcgm_delta_t', 0.01)
         RCGM_N = getattr(self.args, 'rcgm_n_steps', 2)
@@ -263,12 +274,17 @@ class VOSR(nn.Module):
         v = self._teacher_target(model, model_tea, t, t_, lq_noised, lq_weak, z_t, z_noised, z_weak, z_mixed, v_target)
 
         rng_state = torch.cuda.get_rng_state()
-        v_current = model(inp_mixed, t=t, r=t, z=z_mixed)
+        return_hidden_at = getattr(self.args, "repa_layer", None) if return_aux else None
+        v_current, student_hidden = self._split_model_output(
+            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at)
+        )
         v_loss = ((v_current - v) ** 2).mean()
 
         u_loss = self._rcgm_consistency(model, rng_state, inp_mixed, lq_mixed, z_t, z_mixed, t, r, t_, r_, v, DELTA_T, RCGM_N)
 
         loss = v_loss + self.u_weight * u_loss
+        if return_aux:
+            return loss, loss, {"student_hidden": student_hidden}
         return loss, loss
 
     

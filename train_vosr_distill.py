@@ -5,6 +5,7 @@ import logging
 from collections import OrderedDict
 from tqdm import tqdm
 from models.lightningdit import LightningDiT
+from models.repa_align import RepaProjector, repa_cosine_loss
 from pathlib import Path
 from vosr import VOSR
 from datasets import load_dataset
@@ -228,6 +229,56 @@ def requires_grad(model, flag=True):
     """
     for p in model.parameters():
         p.requires_grad = flag
+
+
+def repa_enabled(args):
+    return getattr(args, "repa_type", "none") not in (None, "", "none", "off", "false")
+
+
+def build_ocr_repa_encoder(args, device):
+    model_name = getattr(args, "repa_ocr_model", None)
+    if not model_name:
+        raise ValueError("repa_type='ocr' requires repa_ocr_model in the YAML config.")
+    from transformers import AutoImageProcessor, AutoModel, VisionEncoderDecoderModel
+
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    try:
+        encoder = AutoModel.from_pretrained(model_name)
+    except Exception:
+        encoder = VisionEncoderDecoderModel.from_pretrained(model_name)
+    encoder = encoder.to(device).eval()
+    requires_grad(encoder, False)
+    return processor, encoder
+
+
+@torch.no_grad()
+def extract_ocr_repa_tokens(processor, encoder, image_m11, device, dtype):
+    images = ((image_m11.detach().float() + 1.0) * 0.5).clamp(0, 1)
+    images = [img.cpu() for img in images]
+    inputs = processor(images=images, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    if "pixel_values" in inputs:
+        inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
+    if hasattr(encoder, "get_encoder"):
+        outputs = encoder.get_encoder()(pixel_values=inputs["pixel_values"])
+    else:
+        outputs = encoder(**inputs)
+    if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+        return outputs.last_hidden_state
+    if hasattr(outputs, "pooler_output") and outputs.pooler_output is not None:
+        return outputs.pooler_output.unsqueeze(1)
+    raise ValueError("OCR REPA encoder did not return last_hidden_state or pooler_output.")
+
+
+@torch.no_grad()
+def extract_dino_repa_tokens(venc, image_m11, args):
+    raw_image = (0.5 * image_m11 + 0.5) * 255
+    raw_image_ = preprocess_raw_image(raw_image, args)
+    features, x_norm = venc.forward_with_features(raw_image_)
+    layer = getattr(args, "repa_dino_layer", None)
+    if layer is None:
+        return x_norm
+    return features[f"layer_{layer}"]
 
 class SafeFileHandler(logging.FileHandler):
     """FileHandler that silently ignores flush errors on filesystems that don't support it."""
@@ -521,12 +572,49 @@ def main(config_path):
 
     model.train()
 
+    repa_projector = None
+    repa_ocr_processor = None
+    repa_ocr_encoder = None
+    if repa_enabled(args):
+        args.repa_layer = int(getattr(args, "repa_layer", max(args.depth // 2 - 1, 0)))
+        args.repa_weight = float(getattr(args, "repa_weight", 0.0))
+        args.repa_type = str(getattr(args, "repa_type", "none")).lower()
+        if args.repa_type == "dino":
+            args.repa_target_dim = int(getattr(args, "repa_target_dim", args.enc_dim))
+        elif args.repa_type == "ocr":
+            repa_ocr_processor, repa_ocr_encoder = build_ocr_repa_encoder(args, accelerator.device)
+            default_ocr_dim = getattr(repa_ocr_encoder.config, "hidden_size", None)
+            if default_ocr_dim is None and hasattr(repa_ocr_encoder.config, "encoder"):
+                default_ocr_dim = getattr(repa_ocr_encoder.config.encoder, "hidden_size", None)
+            args.repa_target_dim = int(
+                getattr(
+                    args,
+                    "repa_target_dim",
+                    default_ocr_dim or args.enc_dim,
+                )
+            )
+        else:
+            raise ValueError(f"Invalid repa_type: {args.repa_type}")
+        repa_projector = RepaProjector(
+            input_dim=args.dim,
+            target_dim=args.repa_target_dim,
+            hidden_dim=int(getattr(args, "repa_projector_hidden_dim", args.dim)),
+        )
+        if accelerator.is_main_process:
+            logger.info(
+                f"===========> REPA enabled: type={args.repa_type}, "
+                f"layer={args.repa_layer}, weight={args.repa_weight}, "
+                f"target_dim={args.repa_target_dim}"
+            )
+
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         return model
 
     # Optimizer creation
-    params_to_optimize = model.parameters()
+    params_to_optimize = list(model.parameters())
+    if repa_projector is not None:
+        params_to_optimize += list(repa_projector.parameters())
 
     if args.use_8bit_adam:
         try:
@@ -654,9 +742,14 @@ def main(config_path):
         ema.eval()
         accelerator.register_for_checkpointing(ema)
 
-    model, model_ae, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        model, model_ae, optimizer, train_dataloader, lr_scheduler
-    )
+    if repa_projector is not None:
+        model, model_ae, repa_projector, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            model, model_ae, repa_projector, optimizer, train_dataloader, lr_scheduler
+        )
+    else:
+        model, model_ae, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            model, model_ae, optimizer, train_dataloader, lr_scheduler
+        )
 
     
     
@@ -790,6 +883,7 @@ def main(config_path):
             with torch.no_grad():
                 _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
+                hq_repa = hq.detach() if repa_projector is not None else None
 
             with torch.no_grad():
                 with accelerator.autocast():
@@ -799,6 +893,19 @@ def main(config_path):
                     z = [v for k, v in features.items() if k.startswith('layer_')]
                     z[-1] = x_norm
                     z = [z[i] for i in args.layer_dinov2b_list]
+
+                    repa_target = None
+                    if repa_projector is not None:
+                        if args.repa_type == "dino":
+                            repa_target = extract_dino_repa_tokens(unwrapped_venc, hq_repa, args)
+                        elif args.repa_type == "ocr":
+                            repa_target = extract_ocr_repa_tokens(
+                                repa_ocr_processor,
+                                repa_ocr_encoder,
+                                hq_repa,
+                                accelerator.device,
+                                weight_dtype,
+                            )
                     
             with accelerator.accumulate(model):
                 if global_step >= args.max_train_steps:
@@ -814,11 +921,25 @@ def main(config_path):
                 
                 with accelerator.autocast():
                     if args.distill_type == 'shortcut':
-                        loss, loss_backward = vosr.loss_fm_distill_shortcut_improved(model, lq, hq, z, model_tea=model_tea)
+                        loss_out = vosr.loss_fm_distill_shortcut_improved(
+                            model, lq, hq, z, model_tea=model_tea, return_aux=repa_projector is not None
+                        )
                     elif args.distill_type == 'rcgm':
-                        loss, loss_backward = vosr.loss_fm_distill_rcgm_improved(model, lq, hq, z, model_tea=model_tea)
+                        loss_out = vosr.loss_fm_distill_rcgm_improved(
+                            model, lq, hq, z, model_tea=model_tea, return_aux=repa_projector is not None
+                        )
                     else:
                         raise ValueError(f"Invalid distill type: {args.distill_type}")
+
+                    if repa_projector is not None:
+                        loss, loss_backward, aux = loss_out
+                        if aux["student_hidden"] is None:
+                            raise RuntimeError("REPA requested but student hidden tokens were not returned.")
+                        repa_loss = repa_cosine_loss(aux["student_hidden"], repa_target, repa_projector)
+                        loss = loss + args.repa_weight * repa_loss
+                        loss_backward = loss
+                    else:
+                        loss, loss_backward = loss_out
 
                 # Backward and optimize
                 accelerator.backward(loss_backward)
@@ -964,6 +1085,8 @@ def main(config_path):
                     "lr": lr_scheduler.get_last_lr()[0], 
                     "v_loss": loss.item()
                 }
+                if repa_projector is not None:
+                    logs["repa_loss"] = repa_loss.detach().item()
                 progress_bar.set_postfix(**logs)
                 
             log_loss_steps = getattr(args, "log_loss_steps", 250)
@@ -973,6 +1096,8 @@ def main(config_path):
                     "lr": lr_scheduler.get_last_lr()[0], 
                     "v_loss": loss.item()
                 }
+                if repa_projector is not None:
+                    logs["repa_loss"] = repa_loss.detach().item()
                 accelerator.log(logs, step=global_step)
 
     gc.enable()

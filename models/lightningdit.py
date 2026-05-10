@@ -487,7 +487,7 @@ class LightningDiT(nn.Module):
             block.attn.fused_attn = False
             block.cross_attn.fused_attn = False
 
-    def forward(self, x, t, r=None, z=None):
+    def forward(self, x, t, r=None, z=None, return_hidden_at=None):
         """
         Forward pass of LightningDiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -509,15 +509,20 @@ class LightningDiT(nn.Module):
             z = self.layer_norm(z)  
             z = self.mlp_ca(z)  
 
-        for block in self.blocks:
+        hidden = None
+        for block_idx, block in enumerate(self.blocks):
             if use_checkpoint:
                 x = checkpoint(block, x, c0, z, self.feat_rope, use_reentrant=True)
             else:
                 x = block(x, c0, z, self.feat_rope)
+            if return_hidden_at is not None and block_idx == return_hidden_at:
+                hidden = x
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                   # (N, out_channels, H, W)
 
+        if return_hidden_at is not None:
+            return x, hidden
         return x
     
     def _get_dynamic_rope(self, hw_seq_len, device, dtype):
@@ -558,7 +563,7 @@ class LightningDiT(nn.Module):
 
         return dynamic_rope_fn
 
-    def forward_flexible(self, x, t, r=None, z=None):
+    def forward_flexible(self, x, t, r=None, z=None, return_hidden_at=None):
         """
         Forward pass that supports variable input sizes.
         Unlike the standard forward, this dynamically generates RoPE
@@ -593,15 +598,20 @@ class LightningDiT(nn.Module):
         else:
             feat_rope = None
 
-        for block in self.blocks:
+        hidden = None
+        for block_idx, block in enumerate(self.blocks):
             if use_checkpoint:
                 x = checkpoint(block, x, c0, z, feat_rope, use_reentrant=True)
             else:
                 x = block(x, c0, z, feat_rope)
+            if return_hidden_at is not None and block_idx == return_hidden_at:
+                hidden = x
 
         x = self.final_layer(x, c)                # (N, T, patch_size ** 2 * out_channels)
         x = self.unpatchify(x)                    # (N, out_channels, H, W)
 
+        if return_hidden_at is not None:
+            return x, hidden
         return x
 
   
@@ -681,4 +691,3 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
 
     emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
     return emb
-
