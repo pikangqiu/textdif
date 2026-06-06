@@ -129,6 +129,8 @@ class OCRRepaSystem(nn.Module):
             p.requires_grad_(False)
 
         self._rec_dtype = next(self.rec_net.parameters()).dtype
+        # CTC blank is index 0 in PaddleOCR recognizers (see CTCLabelDecode).
+        self.ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
 
     # ---- detection -------------------------------------------------------
     @torch.no_grad()
@@ -243,9 +245,90 @@ class OCRRepaSystem(nn.Module):
         }
         return loss, logs
 
+    # ---- CTC recognition loss (2b) --------------------------------------
+    def _rec_logits(self, crops_m11):
+        """Raw CTC logits (N, T, num_classes); the head softmax is bypassed."""
+        feat = self._rec_features(crops_m11)  # (N, T, C_neck)
+        head = self.rec_net.head
+        if getattr(head, "mid_channels", None) is None:
+            logits = head.fc(feat)
+        else:
+            logits = head.fc2(head.fc1(feat))
+        return logits
+
+    @torch.no_grad()
+    def _ctc_greedy_targets(self, logits):
+        """Greedy CTC decode -> per-sample index sequences (blank=0, repeats collapsed)."""
+        best = logits.argmax(dim=-1)  # (N, T)
+        targets, lengths = [], []
+        for seq in best.tolist():
+            prev = -1
+            out = []
+            for idx in seq:
+                if idx != 0 and idx != prev:
+                    out.append(idx)
+                prev = idx
+            targets.append(out)
+            lengths.append(len(out))
+        return targets, lengths
+
+    def compute_ctc_loss(self, pred_image_m11, hr_image_m11):
+        """CTC loss of the prediction against HR-derived pseudo transcripts.
+
+        Returns (loss, logs); a zero scalar (no grad) when no decodable text.
+        """
+        if pred_image_m11.shape[-2:] != hr_image_m11.shape[-2:]:
+            pred_image_m11 = F.interpolate(
+                pred_image_m11.float(),
+                size=hr_image_m11.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        boxes_per_image = self._detect_boxes(hr_image_m11)
+        n_boxes = sum(len(b) for b in boxes_per_image)
+        zero_logs = {"ocr_ctc/loss": 0.0, "ocr_ctc/n_boxes": 0.0, "ocr_ctc/n_used": 0.0}
+        if n_boxes == 0:
+            return pred_image_m11.sum() * 0.0, zero_logs
+
+        with torch.no_grad():
+            hr_crops = self._crop_and_stack(hr_image_m11.detach(), boxes_per_image)
+            hr_logits = self._rec_logits(hr_crops)
+            targets, target_lengths = self._ctc_greedy_targets(hr_logits)
+
+        keep = [i for i, length in enumerate(target_lengths) if length > 0]
+        if not keep:
+            return pred_image_m11.sum() * 0.0, zero_logs
+
+        pred_crops = self._crop_and_stack(pred_image_m11, boxes_per_image)
+        pred_logits = self._rec_logits(pred_crops)[keep]  # (Nk, T, K)
+        log_probs = F.log_softmax(pred_logits.float(), dim=-1).transpose(0, 1)  # (T, Nk, K)
+
+        timesteps, n_used = log_probs.shape[0], log_probs.shape[1]
+        device = log_probs.device
+        flat_targets = torch.tensor(
+            [idx for i in keep for idx in targets[i]], dtype=torch.long, device=device
+        )
+        tgt_lengths = torch.tensor([target_lengths[i] for i in keep], dtype=torch.long, device=device)
+        # CTC needs input_length >= target_length; clamp pathological long targets.
+        tgt_lengths = torch.clamp(tgt_lengths, max=timesteps)
+        in_lengths = torch.full((n_used,), timesteps, dtype=torch.long, device=device)
+
+        loss = self.ctc_loss(log_probs, flat_targets, in_lengths, tgt_lengths)
+        logs = {
+            "ocr_ctc/loss": float(loss.detach()),
+            "ocr_ctc/n_boxes": float(n_boxes),
+            "ocr_ctc/n_used": float(n_used),
+        }
+        return loss, logs
+
 
 def ocr_repa_enabled(args) -> bool:
     return float(getattr(args, "ocr_repa_weight", 0.0)) > 0.0
+
+
+def ocr_ctc_enabled(args) -> bool:
+    return float(getattr(args, "ocr_ctc_weight", 0.0)) > 0.0
 
 
 def build_ocr_repa_system(args, device) -> OCRRepaSystem:

@@ -76,6 +76,52 @@ CUDA_VISIBLE_DEVICES="" python -m pytest tests/test_ocr_repa.py -q
 
 预期:region/CTC > global,直接论证"REPA 用于文本 SR 必须局部化"。这是把"表征对齐"推进到"直接文字监督"的第一步;2b(HR 伪标签 + CTC 识别 loss)在此基础上扩展。
 
+---
+
+## 2b：HR 伪标签 + CTC 识别 loss
+
+2a 是"对齐特征",2b 是"直接监督识别结果"——把可读性写进梯度。
+
+```text
+HR 图  --det(no_grad)-->  文字 bbox
+       --crop+rec(no_grad)-->  greedy CTC 解码 -> 伪标签 index 序列
+pred 图 --crop+rec--> CTC logits  --CTCLoss(伪标签)-->  L_ctc
+总损失: L = L_guided_distill + ocr_ctc_weight * L_ctc
+```
+
+要点:
+- 伪标签来自 HR crop 的 recognizer 贪心 CTC 解码(blank=0,合并重复),**确定性、不消耗 RNG**。
+- recognizer 完全冻结;`_rec_logits` 复用 2a 的 `_rec_features`,再手动过 `head.fc` 取原始 logits(eval 模式 head 会自带 softmax,故绕过)。
+- 无可解码文字(伪标签全空)→ 返回 0 loss,不崩。
+- `zero_infinity=True`,并 clamp `target_length <= T`,避免 CTC inf。
+
+### 与 2a 的隔离保证(已用测试钉死)
+
+2b 是**纯加法、默认关**:
+- 独立键 `ocr_ctc_weight`(缺省 0);2a 的 yaml 不含它 → `ctc_active` 恒 False。
+- `ocr_active` 加了 `args.ocr_repa_weight > 0` 守卫,使 CTC-only 跑法不会触发 2a。
+- 不改 `compute_loss` / `_detect_boxes` / `_crop_and_stack`,只新增 `compute_ctc_loss` / `_rec_logits` / `_ctc_greedy_targets`。
+- `tests/test_ocr_repa.py::test_2b_does_not_perturb_2a` 断言:同输入下计算 2b 前后 2a 的 loss 完全相等。
+
+### 配置项 (YAML)
+
+```yaml
+ocr_repa_weight: 0.0     # 关掉 2a,单独看 2b 信号
+ocr_ctc_weight: 0.5      # >0 即启用
+ocr_ctc_interval: 1
+ocr_ctc_start_step: 0
+ocr_ctc_on_sync_only: False
+# det/rec 配置与 2a 共用同一组 ocr_repa_* 键
+```
+
+### 运行
+
+```bash
+NPROC_PER_NODE=4 bash scripts/train_text_repa_ablation.sh ocr_ctc
+```
+
+2a 与 2b 互不冲突,也可在同一份 yaml 里同时设 `ocr_repa_weight` 和 `ocr_ctc_weight` 做组合(检测会各跑一次,开销翻倍)。
+
 ## 已知注意事项
 
 - recognizer 在 `accelerator.autocast()` 下运行;crop 与特征已显式 `.float()`,pred/HR 走同一路径保持一致。

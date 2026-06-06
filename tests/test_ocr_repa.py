@@ -67,3 +67,35 @@ def test_no_text_returns_zero_without_crashing(system):
     loss, logs = system.compute_loss(pred, blank)
     assert loss.item() == 0.0
     assert logs["ocr_repa/n_boxes"] == 0.0
+
+
+def test_ctc_loss_is_differentiable_wrt_prediction(system):
+    hr = _text_image()
+    pred = torch.nn.functional.avg_pool2d(hr, 5, 1, 2).clone().detach().requires_grad_(True)
+    loss, logs = system.compute_ctc_loss(pred, hr)
+    assert logs["ocr_ctc/n_boxes"] > 0
+    assert logs["ocr_ctc/n_used"] > 0
+    assert loss.item() > 0
+    loss.backward()
+    assert torch.isfinite(pred.grad).all()
+    assert pred.grad.abs().sum() > 0
+
+
+def test_ctc_no_text_returns_zero(system):
+    blank = torch.zeros(1, 3, 256, 256)
+    pred = torch.zeros(1, 3, 256, 256, requires_grad=True)
+    loss, logs = system.compute_ctc_loss(pred, blank)
+    assert loss.item() == 0.0
+    assert logs["ocr_ctc/n_boxes"] == 0.0
+
+
+def test_2b_does_not_perturb_2a(system):
+    """Isolation guarantee: computing the CTC loss (2b) must not change the 2a
+    REPA loss for the same inputs (no shared state, no RNG)."""
+    hr = _text_image()
+    pred = torch.nn.functional.avg_pool2d(hr, 5, 1, 2).clone().detach()
+
+    repa_before, _ = system.compute_loss(pred.clone(), hr)
+    _ = system.compute_ctc_loss(pred.clone().requires_grad_(True), hr)
+    repa_after, _ = system.compute_loss(pred.clone(), hr)
+    assert torch.allclose(repa_before, repa_after, atol=0, rtol=0)

@@ -7,7 +7,7 @@ from tqdm import tqdm
 from models.lightningdit import LightningDiT
 from models.repa_align import RepaProjector, repa_cosine_loss
 from models.fd_loss import build_fd_loss_system
-from models.ocr_repa import build_ocr_repa_system, ocr_repa_enabled
+from models.ocr_repa import build_ocr_repa_system, ocr_repa_enabled, ocr_ctc_enabled
 from models.codsr_guidance import ChannelwiseSobel, build_ragp_weight
 from models.vae_encoder_lora import (
     configure_vae_encoder_lora,
@@ -914,18 +914,26 @@ def main(config_path):
             )
 
     ocr_repa_system = None
-    if ocr_repa_enabled(args):
+    if ocr_repa_enabled(args) or ocr_ctc_enabled(args):
+        # 2a: local-crop OCR-REPA
         args.ocr_repa_weight = float(getattr(args, "ocr_repa_weight", 0.0))
         args.ocr_repa_interval = max(1, int(getattr(args, "ocr_repa_interval", 1)))
         args.ocr_repa_start_step = int(getattr(args, "ocr_repa_start_step", 0))
         args.ocr_repa_on_sync_only = bool(getattr(args, "ocr_repa_on_sync_only", False))
+        # 2b: HR-pseudo-label CTC recognition loss (defaults off; independent gate)
+        args.ocr_ctc_weight = float(getattr(args, "ocr_ctc_weight", 0.0))
+        args.ocr_ctc_interval = max(1, int(getattr(args, "ocr_ctc_interval", args.ocr_repa_interval)))
+        args.ocr_ctc_start_step = int(getattr(args, "ocr_ctc_start_step", 0))
+        args.ocr_ctc_on_sync_only = bool(getattr(args, "ocr_ctc_on_sync_only", False))
         ocr_repa_system = build_ocr_repa_system(args, device=accelerator.device)
         ocr_repa_system.eval()
         requires_grad(ocr_repa_system, False)
         if accelerator.is_main_process:
             logger.info(
-                f"===========> Local OCR-REPA enabled: weight={args.ocr_repa_weight}, "
-                f"interval={args.ocr_repa_interval}, start_step={args.ocr_repa_start_step}, "
+                f"===========> OCR text loss enabled: repa_weight={args.ocr_repa_weight} "
+                f"(interval={args.ocr_repa_interval}, start={args.ocr_repa_start_step}), "
+                f"ctc_weight={args.ocr_ctc_weight} "
+                f"(interval={args.ocr_ctc_interval}, start={args.ocr_ctc_start_step}), "
                 f"loss_type={ocr_repa_system.config.loss_type}, max_boxes={ocr_repa_system.config.max_boxes}"
             )
 
@@ -1309,11 +1317,19 @@ def main(config_path):
                     )
                     ocr_active = (
                         ocr_repa_system is not None
+                        and args.ocr_repa_weight > 0
                         and global_step >= args.ocr_repa_start_step
                         and global_step % args.ocr_repa_interval == 0
                         and (not args.ocr_repa_on_sync_only or accelerator.sync_gradients)
                     )
-                    need_aux = repa_projector is not None or fd_active or ocr_active
+                    ctc_active = (
+                        ocr_repa_system is not None
+                        and args.ocr_ctc_weight > 0
+                        and global_step >= args.ocr_ctc_start_step
+                        and global_step % args.ocr_ctc_interval == 0
+                        and (not args.ocr_ctc_on_sync_only or accelerator.sync_gradients)
+                    )
+                    need_aux = repa_projector is not None or fd_active or ocr_active or ctc_active
                     if args.distill_type == 'shortcut':
                         loss_out = vosr.loss_fm_distill_shortcut_improved(
                             model,
@@ -1344,6 +1360,8 @@ def main(config_path):
                     fd_new_feats = None
                     ocr_repa_loss = None
                     ocr_repa_logs = {}
+                    ocr_ctc_loss = None
+                    ocr_ctc_logs = {}
                     pred_image_m11 = None
                     if need_aux:
                         loss, loss_backward, aux = loss_out
@@ -1361,7 +1379,7 @@ def main(config_path):
                         loss = loss + args.repa_weight * repa_loss
                         loss_backward = loss
 
-                    if fd_active or ocr_active:
+                    if fd_active or ocr_active or ctc_active:
                         pred_image_m11 = decode_x0_from_distill_aux(
                             aux,
                             unwrapped_model_ae,
@@ -1380,6 +1398,13 @@ def main(config_path):
                             pred_image_m11, hq_image_m11
                         )
                         loss = loss + args.ocr_repa_weight * ocr_repa_loss
+                        loss_backward = loss
+
+                    if ctc_active:
+                        ocr_ctc_loss, ocr_ctc_logs = ocr_repa_system.compute_ctc_loss(
+                            pred_image_m11, hq_image_m11
+                        )
+                        loss = loss + args.ocr_ctc_weight * ocr_ctc_loss
                         loss_backward = loss
 
                     if not need_aux:
@@ -1562,6 +1587,9 @@ def main(config_path):
                 if ocr_repa_loss is not None:
                     logs["ocr_repa_loss"] = ocr_repa_loss.detach().item()
                     logs.update(ocr_repa_logs)
+                if ocr_ctc_loss is not None:
+                    logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
+                    logs.update(ocr_ctc_logs)
                 progress_bar.set_postfix(**logs)
                 
             log_loss_steps = getattr(args, "log_loss_steps", 250)
@@ -1579,6 +1607,9 @@ def main(config_path):
                 if ocr_repa_loss is not None:
                     logs["ocr_repa_loss"] = ocr_repa_loss.detach().item()
                     logs.update(ocr_repa_logs)
+                if ocr_ctc_loss is not None:
+                    logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
+                    logs.update(ocr_ctc_logs)
                 accelerator.log(logs, step=global_step)
 
     gc.enable()

@@ -8,6 +8,7 @@ set -euo pipefail
 #   bash scripts/train_text_repa_ablation.sh dino_token
 #   bash scripts/train_text_repa_ablation.sh ocr
 #   bash scripts/train_text_repa_ablation.sh ocr_local
+#   bash scripts/train_text_repa_ablation.sh ocr_ctc
 #   bash scripts/train_text_repa_ablation.sh seg
 #   bash scripts/train_text_repa_ablation.sh seg_token
 #   NPROC_PER_NODE=4 bash scripts/train_text_repa_ablation.sh dino
@@ -38,6 +39,9 @@ case "${EXP}" in
   ocr_local)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_local_repa.yml"
     ;;
+  ocr_ctc)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_ctc.yml"
+    ;;
   seg)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_seg_repa.yml"
     ;;
@@ -45,7 +49,7 @@ case "${EXP}" in
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_seg_token_repa.yml"
     ;;
   *)
-    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, seg, or seg_token." >&2
+    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_ctc, seg, or seg_token." >&2
     exit 2
     ;;
 esac
