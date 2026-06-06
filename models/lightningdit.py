@@ -22,6 +22,7 @@ from timm.models.vision_transformer import PatchEmbed, Mlp
 from .swiglu_ffn import SwiGLUFFN 
 from .pos_embed import VisionRotaryEmbeddingFast
 from .rmsnorm import RMSNorm
+from .codsr_guidance import LQTokenModulation
 
 
 
@@ -353,6 +354,8 @@ class LightningDiT(nn.Module):
         encdim_ratio=2, 
         num_fused_layers=1,
         auxiliary_time_cond=False,
+        use_lq_token_modulation=False,
+        lq_mod_downscale_factor=8,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -365,7 +368,15 @@ class LightningDiT(nn.Module):
         self.depth = depth
         self.hidden_size = hidden_size
         self.use_checkpoint = use_checkpoint
+        self.use_lq_token_modulation = use_lq_token_modulation
         self.x_embedder = PatchEmbed(input_size, patch_size, self.in_channels, hidden_size, bias=True, strict_img_size=False)
+        if self.use_lq_token_modulation:
+            self.lq_token_modulation = LQTokenModulation(
+                hidden_size=hidden_size,
+                downscale_factor=lq_mod_downscale_factor,
+            )
+        else:
+            self.lq_token_modulation = None
         self.t_embedder = TimestepEmbedder(hidden_size)
         num_patches = self.x_embedder.num_patches
         # Will use fixed sin-cos embedding:
@@ -487,7 +498,7 @@ class LightningDiT(nn.Module):
             block.attn.fused_attn = False
             block.cross_attn.fused_attn = False
 
-    def forward(self, x, t, r=None, z=None, return_hidden_at=None):
+    def forward(self, x, t, r=None, z=None, return_hidden_at=None, lq_mod=None):
         """
         Forward pass of LightningDiT.
         x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images)
@@ -497,6 +508,8 @@ class LightningDiT(nn.Module):
 
         use_checkpoint = self.use_checkpoint
         x = self.x_embedder(x)
+        if self.lq_token_modulation is not None and lq_mod is not None:
+            x = self.lq_token_modulation(x, lq_mod)
         t_raw = t                                                        # (N,) save raw timestep
         t = self.t_embedder(t)                                          # (N, D)
         r = self.r_embedder(r)*(t_raw-r).unsqueeze(-1) if self.r_embedder is not None else 0    # (N, D)
@@ -563,7 +576,7 @@ class LightningDiT(nn.Module):
 
         return dynamic_rope_fn
 
-    def forward_flexible(self, x, t, r=None, z=None, return_hidden_at=None):
+    def forward_flexible(self, x, t, r=None, z=None, return_hidden_at=None, lq_mod=None):
         """
         Forward pass that supports variable input sizes.
         Unlike the standard forward, this dynamically generates RoPE
@@ -577,6 +590,8 @@ class LightningDiT(nn.Module):
         current_hw_seq_len = H // self.patch_size
 
         x = self.x_embedder(x)   # (N, T, D)
+        if self.lq_token_modulation is not None and lq_mod is not None:
+            x = self.lq_token_modulation(x, lq_mod)
         t_raw = t   
         t = self.t_embedder(t)                                          # (N, D)
         r = self.r_embedder(r)*(t_raw-r).unsqueeze(-1) if self.r_embedder is not None else 0    # (N, D)

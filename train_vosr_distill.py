@@ -6,6 +6,15 @@ from collections import OrderedDict
 from tqdm import tqdm
 from models.lightningdit import LightningDiT
 from models.repa_align import RepaProjector, repa_cosine_loss
+from models.fd_loss import build_fd_loss_system
+from models.ocr_repa import build_ocr_repa_system, ocr_repa_enabled
+from models.codsr_guidance import ChannelwiseSobel, build_ragp_weight
+from models.vae_encoder_lora import (
+    configure_vae_encoder_lora,
+    encode_lq_hq_latents,
+    get_vae_lora_state_dict,
+    resolve_vae_lora_path,
+)
 from pathlib import Path
 from vosr import VOSR
 from datasets import load_dataset
@@ -235,6 +244,10 @@ def repa_enabled(args):
     return getattr(args, "repa_type", "none") not in (None, "", "none", "off", "false")
 
 
+def fd_loss_enabled(args):
+    return float(getattr(args, "fd_loss_weight", 0.0)) > 0.0
+
+
 def build_ocr_repa_encoder(args, device):
     model_name = getattr(args, "repa_ocr_model", None)
     if not model_name:
@@ -251,11 +264,26 @@ def build_ocr_repa_encoder(args, device):
     return processor, encoder
 
 
+def build_seg_repa_encoder(args, device):
+    model_name = getattr(args, "repa_seg_model", None)
+    if not model_name:
+        raise ValueError("repa_type='seg' requires repa_seg_model in the YAML config.")
+    from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
+
+    processor = AutoImageProcessor.from_pretrained(model_name, use_fast=False)
+    encoder = AutoModelForSemanticSegmentation.from_pretrained(
+        model_name,
+        use_safetensors=True,
+    ).to(device).eval()
+    requires_grad(encoder, False)
+    return processor, encoder
+
+
 @torch.no_grad()
 def extract_ocr_repa_tokens(processor, encoder, image_m11, device, dtype):
     images = ((image_m11.detach().float() + 1.0) * 0.5).clamp(0, 1)
     images = [img.cpu() for img in images]
-    inputs = processor(images=images, return_tensors="pt")
+    inputs = processor(images=images, return_tensors="pt", do_rescale=False)
     inputs = {k: v.to(device) for k, v in inputs.items()}
     if "pixel_values" in inputs:
         inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
@@ -271,6 +299,27 @@ def extract_ocr_repa_tokens(processor, encoder, image_m11, device, dtype):
 
 
 @torch.no_grad()
+def extract_seg_repa_tokens(processor, encoder, image_m11, device, dtype, args):
+    images = ((image_m11.detach().float() + 1.0) * 0.5).clamp(0, 1)
+    images = [img.cpu() for img in images]
+    inputs = processor(images=images, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    if "pixel_values" in inputs:
+        inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
+    outputs = encoder(**inputs, output_hidden_states=True, return_dict=True)
+    hidden_states = getattr(outputs, "hidden_states", None)
+    if not hidden_states:
+        raise ValueError("Segmentation REPA encoder did not return hidden_states.")
+    layer = int(getattr(args, "repa_seg_layer", -1))
+    target = hidden_states[layer]
+    if target.ndim == 4:
+        target = target.flatten(2).transpose(1, 2)
+    elif target.ndim != 3:
+        raise ValueError(f"Unexpected segmentation hidden state shape: {tuple(target.shape)}")
+    return target
+
+
+@torch.no_grad()
 def extract_dino_repa_tokens(venc, image_m11, args):
     raw_image = (0.5 * image_m11 + 0.5) * 255
     raw_image_ = preprocess_raw_image(raw_image, args)
@@ -278,7 +327,190 @@ def extract_dino_repa_tokens(venc, image_m11, args):
     layer = getattr(args, "repa_dino_layer", None)
     if layer is None:
         return x_norm
-    return features[f"layer_{layer}"]
+    if isinstance(layer, str) and layer.lower() in ("norm", "final", "x_norm", "x_norm_patchtokens"):
+        return x_norm
+    return features[f"layer_{int(layer)}"]
+
+
+def decode_x0_from_distill_aux(aux, model_ae, args, latents_mean=None, latents_std=None):
+    """Decode the current one-step x0 prediction from VOSR distillation aux."""
+    t_img = aux["t"].reshape(-1, 1, 1, 1)
+    pred_hq_latent = aux["z_t"] - t_img * aux["v_current"]
+    fd_decode_latent_size = getattr(args, "fd_decode_latent_size", None)
+    if fd_decode_latent_size is not None:
+        fd_decode_latent_size = int(fd_decode_latent_size)
+        if fd_decode_latent_size > 0 and pred_hq_latent.shape[-1] != fd_decode_latent_size:
+            pred_hq_latent = torch.nn.functional.interpolate(
+                pred_hq_latent.float(),
+                size=(fd_decode_latent_size, fd_decode_latent_size),
+                mode="bilinear",
+                align_corners=False,
+            ).to(pred_hq_latent.dtype)
+    if args.ae_type == "qwen":
+        pred_decode_latent = pred_hq_latent / latents_std + latents_mean
+        return model_ae.decode(pred_decode_latent, return_dict=False)[0]
+    if args.ae_type == "sd2":
+        pred_decode_latent = pred_hq_latent / model_ae.config.scaling_factor
+        return model_ae.decode(
+            pred_decode_latent.to(model_ae.dtype),
+            return_dict=False,
+        )[0]
+    raise ValueError(f"Unsupported ae_type for FD-Loss decode: {args.ae_type}")
+
+
+@torch.no_grad()
+def make_fd_queue_images(
+    batch,
+    accelerator,
+    degradation,
+    args,
+    vosr,
+    model,
+    model_tea,
+    model_ae,
+    venc,
+    latents_mean=None,
+    latents_std=None,
+):
+    """Generate current student SR predictions for FD-Loss queue initialization."""
+    hq_image_01 = batch["hq"].to(accelerator.device, non_blocking=True)
+    _, lq_image_01 = degradation.degrade_process(hq_image_01, resize_bak=True)
+    hq_image_m11 = hq_image_01 * 2.0 - 1.0
+    lq_image_m11 = lq_image_01 * 2.0 - 1.0
+
+    with accelerator.autocast():
+        raw_image = (0.5 * lq_image_m11 + 0.5) * 255
+        raw_image_ = preprocess_raw_image(raw_image, args)
+        features, x_norm = venc.forward_with_features(raw_image_)
+        z = [v for k, v in features.items() if k.startswith("layer_")]
+        z[-1] = x_norm
+        z = [z[i] for i in args.layer_dinov2b_list]
+
+        lq_latent, hq_latent = encode_lq_hq_latents(
+            model_ae,
+            lq_image_m11,
+            hq_image_m11,
+            args.ae_type,
+            use_vae_encoder_lora=bool(getattr(args, "use_vae_encoder_lora", False)),
+            latents_mean=latents_mean,
+            latents_std=latents_std,
+        )
+        ragp_weight = None
+        if getattr(args, "use_codsr_ragp", False):
+            ragp_weight = build_ragp_weight(
+                lq_image_m11,
+                target_hw8=lq_latent.shape[-2:],
+            )
+        lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
+
+        if args.distill_type == "shortcut":
+            loss_out = vosr.loss_fm_distill_shortcut_improved(
+                model,
+                lq_latent,
+                hq_latent,
+                z,
+                model_tea=model_tea,
+                return_aux=True,
+                ragp_weight=ragp_weight,
+                lq_mod=lq_mod,
+            )
+        elif args.distill_type == "rcgm":
+            loss_out = vosr.loss_fm_distill_rcgm_improved(
+                model,
+                lq_latent,
+                hq_latent,
+                z,
+                model_tea=model_tea,
+                return_aux=True,
+                ragp_weight=ragp_weight,
+                lq_mod=lq_mod,
+            )
+        else:
+            raise ValueError(f"Invalid distill type for FD-Loss queue init: {args.distill_type}")
+
+        _, _, aux = loss_out
+        return decode_x0_from_distill_aux(aux, model_ae, args, latents_mean, latents_std)
+
+
+@torch.no_grad()
+def fill_fd_feature_queues(
+    fd_system,
+    train_dataloader,
+    accelerator,
+    logger,
+    degradation,
+    args,
+    vosr,
+    model,
+    model_tea,
+    model_ae,
+    venc,
+    latents_mean=None,
+    latents_std=None,
+):
+    """Initialize generated-feature queues using the current VOSR student."""
+    queue_size = int(fd_system.config.queue_size)
+    if queue_size == 0:
+        if accelerator.is_main_process:
+            logger.info("[FD] fd_queue_size=0: skip generated-feature queue fill")
+        return
+
+    was_training = model.training
+    unwrapped_model = accelerator.unwrap_model(model)
+    old_use_checkpoint = getattr(unwrapped_model, "use_checkpoint", None)
+    if old_use_checkpoint is not None:
+        unwrapped_model.use_checkpoint = False
+    model.eval()
+    filled = 0
+    data_iter = iter(train_dataloader)
+    progress = tqdm(
+        total=queue_size,
+        desc="FD queue init",
+        disable=not accelerator.is_local_main_process,
+    )
+
+    if accelerator.is_main_process:
+        logger.info(f"[FD] Filling generated-feature queue with {queue_size} current student samples")
+
+    while filled < queue_size:
+        try:
+            batch = next(data_iter)
+        except StopIteration:
+            data_iter = iter(train_dataloader)
+            batch = next(data_iter)
+
+        pred_image_m11 = make_fd_queue_images(
+            batch,
+            accelerator,
+            degradation,
+            args,
+            vosr,
+            model,
+            model_tea,
+            model_ae,
+            venc,
+            latents_mean=latents_mean,
+            latents_std=latents_std,
+        )
+        written = fd_system.init_queues_from_images(
+            pred_image_m11,
+            start=filled,
+            max_count=queue_size - filled,
+        )
+        if written <= 0:
+            raise RuntimeError("FD-Loss queue initialization wrote zero features.")
+        filled += written
+        progress.update(written)
+
+    progress.close()
+    fd_system.finalize_queue_init()
+    accelerator.wait_for_everyone()
+    if accelerator.is_main_process:
+        logger.info("[FD] Generated-feature queue initialization finished")
+    if old_use_checkpoint is not None:
+        unwrapped_model.use_checkpoint = old_use_checkpoint
+    if was_training:
+        model.train()
 
 class SafeFileHandler(logging.FileHandler):
     """FileHandler that silently ignores flush errors on filesystems that don't support it."""
@@ -482,6 +714,8 @@ def main(config_path):
 
         iqa_lpips = pyiqa.create_metric('lpips', device='cuda')
         iqa_musiq = pyiqa.create_metric('musiq', device='cuda')
+    else:
+        logger = get_logger(__name__)
             
     if args.ae_type == "qwen":
         from models.qwenimage_vae2d import AutoencoderKLQwenImage2D
@@ -492,6 +726,33 @@ def main(config_path):
 
     model_ae = model_ae.to(accelerator.device)
     model_ae.eval()
+    requires_grad(model_ae, False)
+    use_vae_encoder_lora = bool(getattr(args, "use_vae_encoder_lora", False))
+    if use_vae_encoder_lora:
+        vae_lora_path = resolve_vae_lora_path(
+            getattr(args, "teacher_ckpt", ""),
+            getattr(args, "vae_lora_ckpt", None),
+        )
+        if vae_lora_path is None:
+            raise FileNotFoundError(
+                "use_vae_encoder_lora is enabled, but no vae_encoder_lora.safetensors "
+                "was found beside teacher_ckpt and vae_lora_ckpt was not provided."
+            )
+        vae_lora_targets = configure_vae_encoder_lora(
+            model_ae,
+            rank=int(getattr(args, "vae_lora_rank", 4)),
+            weight_path=vae_lora_path,
+            trainable=False,
+        )
+        requires_grad(model_ae, False)
+        args.vae_lora_ckpt = str(vae_lora_path)
+        if accelerator.is_main_process:
+            logger.info(
+                f"===========> Frozen VAE encoder LoRA loaded: {vae_lora_path}, "
+                f"rank={getattr(args, 'vae_lora_rank', 4)}, targets={len(vae_lora_targets)}"
+            )
+    if getattr(args, "vae_enable_slicing", True) and hasattr(model_ae, "enable_slicing"):
+        model_ae.enable_slicing()
     
     # If passed along, set the training seed now.
     
@@ -522,6 +783,8 @@ def main(config_path):
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
         use_checkpoint=getattr(args, "teacher_use_checkpoint", False),
+        use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
+        lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
     )
 
     tea_ckpt_path = getattr(args, 'teacher_ckpt', None)
@@ -563,18 +826,26 @@ def main(config_path):
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
         use_checkpoint=getattr(args, "use_checkpoint", False),
+        use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
+        lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     total_params_in_billion = total_params / 1e9
     if accelerator.is_main_process:
         logger.info(f"===========> Student parameters: {total_params} ({total_params_in_billion:.3f} B)")
+        if getattr(args, "use_codsr_ragp", False):
+            logger.info("===========> CODSR RAGP enabled")
+        if getattr(args, "use_lq_token_modulation", False):
+            logger.info("===========> CODSR LQ token modulation enabled")
 
     model.train()
 
     repa_projector = None
     repa_ocr_processor = None
     repa_ocr_encoder = None
+    repa_seg_processor = None
+    repa_seg_encoder = None
     if repa_enabled(args):
         args.repa_layer = int(getattr(args, "repa_layer", max(args.depth // 2 - 1, 0)))
         args.repa_weight = float(getattr(args, "repa_weight", 0.0))
@@ -593,6 +864,21 @@ def main(config_path):
                     default_ocr_dim or args.enc_dim,
                 )
             )
+        elif args.repa_type == "seg":
+            repa_seg_processor, repa_seg_encoder = build_seg_repa_encoder(args, accelerator.device)
+            hidden_sizes = getattr(repa_seg_encoder.config, "hidden_sizes", None)
+            if hidden_sizes is not None:
+                seg_layer = int(getattr(args, "repa_seg_layer", -1))
+                default_seg_dim = hidden_sizes[seg_layer]
+            else:
+                default_seg_dim = getattr(repa_seg_encoder.config, "hidden_size", None)
+            args.repa_target_dim = int(
+                getattr(
+                    args,
+                    "repa_target_dim",
+                    default_seg_dim or args.enc_dim,
+                )
+            )
         else:
             raise ValueError(f"Invalid repa_type: {args.repa_type}")
         repa_projector = RepaProjector(
@@ -605,6 +891,42 @@ def main(config_path):
                 f"===========> REPA enabled: type={args.repa_type}, "
                 f"layer={args.repa_layer}, weight={args.repa_weight}, "
                 f"target_dim={args.repa_target_dim}"
+            )
+
+    fd_system = None
+    if fd_loss_enabled(args):
+        args.fd_loss_weight = float(getattr(args, "fd_loss_weight", 0.0))
+        args.fd_loss_interval = max(1, int(getattr(args, "fd_loss_interval", 1)))
+        args.fd_loss_start_step = int(getattr(args, "fd_loss_start_step", 0))
+        args.fd_loss_on_sync_only = bool(getattr(args, "fd_loss_on_sync_only", False))
+        fd_system = build_fd_loss_system(args, device=accelerator.device)
+        fd_system.eval()
+        requires_grad(fd_system, False)
+        if accelerator.is_main_process:
+            judge_desc = ", ".join(
+                f"{j['name']}(w={j['weight']}, pool={j['pool_type']})"
+                for j in fd_system.judges
+            )
+            logger.info(
+                f"===========> FD-Loss enabled: weight={args.fd_loss_weight}, "
+                f"queue_size={fd_system.config.queue_size}, interval={args.fd_loss_interval}, "
+                f"sync_only={args.fd_loss_on_sync_only}, judges=[{judge_desc}]"
+            )
+
+    ocr_repa_system = None
+    if ocr_repa_enabled(args):
+        args.ocr_repa_weight = float(getattr(args, "ocr_repa_weight", 0.0))
+        args.ocr_repa_interval = max(1, int(getattr(args, "ocr_repa_interval", 1)))
+        args.ocr_repa_start_step = int(getattr(args, "ocr_repa_start_step", 0))
+        args.ocr_repa_on_sync_only = bool(getattr(args, "ocr_repa_on_sync_only", False))
+        ocr_repa_system = build_ocr_repa_system(args, device=accelerator.device)
+        ocr_repa_system.eval()
+        requires_grad(ocr_repa_system, False)
+        if accelerator.is_main_process:
+            logger.info(
+                f"===========> Local OCR-REPA enabled: weight={args.ocr_repa_weight}, "
+                f"interval={args.ocr_repa_interval}, start_step={args.ocr_repa_start_step}, "
+                f"loss_type={ocr_repa_system.config.loss_type}, max_boxes={ocr_repa_system.config.max_boxes}"
             )
 
     def unwrap_model(model):
@@ -752,12 +1074,26 @@ def main(config_path):
         )
 
     
-    
+    fd_queue_restored = False
+
     if resume_path:
         global_step = current_step
         if accelerator.is_main_process:
             logger.info(f"Loading state from {resume_path}")
         accelerator.load_state(resume_path)
+        if fd_system is not None:
+            fd_queue_path = os.path.join(resume_path, "fd_queue_states.pt")
+            if os.path.exists(fd_queue_path):
+                queue_states = torch.load(fd_queue_path, map_location=accelerator.device)
+                fd_queue_restored = fd_system.load_queue_states(queue_states)
+                if accelerator.is_main_process:
+                    logger.info(
+                        "[FD] Restored generated-feature queue states from checkpoint"
+                        if fd_queue_restored
+                        else "[FD] Queue state file exists but did not match all judges; will refill"
+                    )
+            elif accelerator.is_main_process:
+                logger.info("[FD] No saved queue state found in checkpoint; will refill")
     elif args.pretrained_ckpt:
         pretrained_path = args.pretrained_ckpt
         if accelerator.is_main_process:
@@ -868,6 +1204,29 @@ def main(config_path):
             unwrapped_model_ae.device, unwrapped_model_ae.dtype
         )
 
+    if fd_system is not None and not fd_queue_restored:
+        fill_fd_feature_queues(
+            fd_system,
+            train_dataloader,
+            accelerator,
+            logger,
+            degradation,
+            args,
+            vosr,
+            model,
+            model_tea,
+            unwrapped_model_ae,
+            unwrapped_venc,
+            latents_mean=latents_mean if args.ae_type == "qwen" else None,
+            latents_std=latents_std if args.ae_type == "qwen" else None,
+        )
+    elif fd_system is not None and accelerator.is_main_process:
+        logger.info("[FD] Using restored generated-feature queue; skip queue fill")
+
+    ragp_sobel = None
+    if getattr(args, "use_codsr_ragp", False):
+        ragp_sobel = ChannelwiseSobel(mode="fast").to(accelerator.device)
+
     gc.disable()
     
     while global_step < args.max_train_steps:
@@ -883,7 +1242,9 @@ def main(config_path):
             with torch.no_grad():
                 _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
+                lq_image_m11 = lq
                 hq_repa = hq.detach() if repa_projector is not None else None
+                hq_image_m11 = hq.detach() if ocr_repa_system is not None else None
 
             with torch.no_grad():
                 with accelerator.autocast():
@@ -906,43 +1267,130 @@ def main(config_path):
                                 accelerator.device,
                                 weight_dtype,
                             )
+                        elif args.repa_type == "seg":
+                            repa_target = extract_seg_repa_tokens(
+                                repa_seg_processor,
+                                repa_seg_encoder,
+                                hq_repa,
+                                accelerator.device,
+                                weight_dtype,
+                                args,
+                            )
                     
             with accelerator.accumulate(model):
                 if global_step >= args.max_train_steps:
                     break
                     
                 with torch.no_grad():
-                    combined = torch.cat([lq, hq], dim=0)
-                    if args.ae_type == 'qwen':
-                        combined_latent = (unwrapped_model_ae.encode(combined).latent_dist.sample() - latents_mean) * latents_std
-                    elif args.ae_type == 'sd2':
-                        combined_latent = unwrapped_model_ae.encode(combined.to(unwrapped_model_ae.dtype)).latent_dist.sample() * unwrapped_model_ae.config.scaling_factor
-                    lq, hq = combined_latent.chunk(2, dim=0)
+                    lq, hq = encode_lq_hq_latents(
+                        unwrapped_model_ae,
+                        lq,
+                        hq,
+                        args.ae_type,
+                        use_vae_encoder_lora=use_vae_encoder_lora,
+                        latents_mean=latents_mean if args.ae_type == "qwen" else None,
+                        latents_std=latents_std if args.ae_type == "qwen" else None,
+                    )
+                    ragp_weight = None
+                    if getattr(args, "use_codsr_ragp", False):
+                        ragp_weight = build_ragp_weight(
+                            lq_image_m11,
+                            target_hw8=lq.shape[-2:],
+                            sobel_layer=ragp_sobel,
+                        )
+                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
                 
                 with accelerator.autocast():
+                    fd_active = (
+                        fd_system is not None
+                        and global_step >= args.fd_loss_start_step
+                        and global_step % args.fd_loss_interval == 0
+                        and (not args.fd_loss_on_sync_only or accelerator.sync_gradients)
+                    )
+                    ocr_active = (
+                        ocr_repa_system is not None
+                        and global_step >= args.ocr_repa_start_step
+                        and global_step % args.ocr_repa_interval == 0
+                        and (not args.ocr_repa_on_sync_only or accelerator.sync_gradients)
+                    )
+                    need_aux = repa_projector is not None or fd_active or ocr_active
                     if args.distill_type == 'shortcut':
                         loss_out = vosr.loss_fm_distill_shortcut_improved(
-                            model, lq, hq, z, model_tea=model_tea, return_aux=repa_projector is not None
+                            model,
+                            lq,
+                            hq,
+                            z,
+                            model_tea=model_tea,
+                            return_aux=need_aux,
+                            ragp_weight=ragp_weight,
+                            lq_mod=lq_mod,
                         )
                     elif args.distill_type == 'rcgm':
                         loss_out = vosr.loss_fm_distill_rcgm_improved(
-                            model, lq, hq, z, model_tea=model_tea, return_aux=repa_projector is not None
+                            model,
+                            lq,
+                            hq,
+                            z,
+                            model_tea=model_tea,
+                            return_aux=need_aux,
+                            ragp_weight=ragp_weight,
+                            lq_mod=lq_mod,
                         )
                     else:
                         raise ValueError(f"Invalid distill type: {args.distill_type}")
 
-                    if repa_projector is not None:
+                    fd_loss = None
+                    fd_logs = {}
+                    fd_new_feats = None
+                    ocr_repa_loss = None
+                    ocr_repa_logs = {}
+                    pred_image_m11 = None
+                    if need_aux:
                         loss, loss_backward, aux = loss_out
+                        distill_loss_log = loss.detach()
+
+                    if repa_projector is not None:
                         if aux["student_hidden"] is None:
                             raise RuntimeError("REPA requested but student hidden tokens were not returned.")
-                        repa_loss = repa_cosine_loss(aux["student_hidden"], repa_target, repa_projector)
+                        repa_loss = repa_cosine_loss(
+                            aux["student_hidden"],
+                            repa_target,
+                            repa_projector,
+                            mode=getattr(args, "repa_align_mode", "global"),
+                        )
                         loss = loss + args.repa_weight * repa_loss
                         loss_backward = loss
-                    else:
+
+                    if fd_active or ocr_active:
+                        pred_image_m11 = decode_x0_from_distill_aux(
+                            aux,
+                            unwrapped_model_ae,
+                            args,
+                            latents_mean=latents_mean if args.ae_type == "qwen" else None,
+                            latents_std=latents_std if args.ae_type == "qwen" else None,
+                        )
+
+                    if fd_active:
+                        fd_loss, fd_logs, fd_new_feats = fd_system.compute_loss(pred_image_m11)
+                        loss = loss + args.fd_loss_weight * fd_loss
+                        loss_backward = loss
+
+                    if ocr_active:
+                        ocr_repa_loss, ocr_repa_logs = ocr_repa_system.compute_loss(
+                            pred_image_m11, hq_image_m11
+                        )
+                        loss = loss + args.ocr_repa_weight * ocr_repa_loss
+                        loss_backward = loss
+
+                    if not need_aux:
                         loss, loss_backward = loss_out
+                        distill_loss_log = loss.detach()
 
                 # Backward and optimize
                 accelerator.backward(loss_backward)
+
+                if fd_active and fd_new_feats is not None:
+                    fd_system.enqueue_features(fd_new_feats)
                 
                 if accelerator.sync_gradients and args.max_grad_norm > 0:
                     accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
@@ -969,12 +1417,23 @@ def main(config_path):
                     
                     if accelerator.is_main_process:
                         import threading
+
+                        if fd_system is not None:
+                            torch.save(
+                                fd_system.export_queue_states(),
+                                os.path.join(ckpt_dir, "fd_queue_states.pt"),
+                            )
                         
                         unwrapped_model = accelerator.unwrap_model(model)
                         model_state_cpu = {k: v.cpu().clone() for k, v in unwrapped_model.state_dict().items()}
                         ema_state_cpu = {k: v.cpu().clone() for k, v in ema.state_dict().items()} if args.use_ema else None
+                        vae_lora_state_cpu = (
+                            get_vae_lora_state_dict(accelerator.unwrap_model(model_ae))
+                            if use_vae_encoder_lora
+                            else None
+                        )
                         
-                        def save_clean_weights(model_state, ema_state, save_dir):
+                        def save_clean_weights(model_state, ema_state, vae_lora_state, save_dir):
                             os.makedirs(save_dir, exist_ok=True)
                             clean_model_dir = f"{save_dir}/clean_weights"
                             os.makedirs(clean_model_dir, exist_ok=True)
@@ -982,10 +1441,15 @@ def main(config_path):
                             save_file(model_state, f"{clean_model_dir}/model.safetensors")
                             if ema_state is not None:
                                 save_file(ema_state, f"{clean_model_dir}/ema_model.safetensors")
+                            if vae_lora_state is not None:
+                                save_file(
+                                    vae_lora_state,
+                                    f"{clean_model_dir}/vae_encoder_lora.safetensors",
+                                )
                         
                         save_thread = threading.Thread(
                             target=save_clean_weights, 
-                            args=(model_state_cpu, ema_state_cpu, ckpt_dir),
+                            args=(model_state_cpu, ema_state_cpu, vae_lora_state_cpu, ckpt_dir),
                             daemon=False  # avoid thread killed mid-write on process exit
                         )
                         save_thread.start()
@@ -1020,6 +1484,7 @@ def main(config_path):
 
                                 lq = to_tensor(lq_img).unsqueeze(0).to(accelerator.device)  # 0-1
                                 lq = lq * 2.0 - 1.0                                                         # -1-1
+                                lq_image_m11 = lq
 
 
                                 with Image.open(gt_path) as img:
@@ -1038,12 +1503,16 @@ def main(config_path):
 
                                 if args.ae_type == 'qwen':
                                     lq = (unwrapped_model_ae.encode(lq).latent_dist.sample() - latents_mean) * latents_std
-                                    sr_m11 = vosr.sample_onestep(ema, lq, n_steps=args.infer_steps, venc_fea=z)
+                                    ragp_weight = build_ragp_weight(lq_image_m11, target_hw8=lq.shape[-2:], sobel_layer=ragp_sobel) if getattr(args, "use_codsr_ragp", False) else None
+                                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
+                                    sr_m11 = vosr.sample_onestep(ema, lq, n_steps=args.infer_steps, venc_fea=z, ragp_weight=ragp_weight, lq_mod=lq_mod)
                                     sr_m11 = sr_m11 / latents_std + latents_mean
                                     sr_m11 = unwrapped_model_ae.decode(sr_m11, return_dict=False)[0].clamp(-1, 1)
                                 elif args.ae_type == 'sd2':
                                     lq = unwrapped_model_ae.encode(lq).latent_dist.sample() * unwrapped_model_ae.config.scaling_factor
-                                    sr_m11 = vosr.sample_onestep(ema, lq, n_steps=args.infer_steps, venc_fea=z)
+                                    ragp_weight = build_ragp_weight(lq_image_m11, target_hw8=lq.shape[-2:], sobel_layer=ragp_sobel) if getattr(args, "use_codsr_ragp", False) else None
+                                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
+                                    sr_m11 = vosr.sample_onestep(ema, lq, n_steps=args.infer_steps, venc_fea=z, ragp_weight=ragp_weight, lq_mod=lq_mod)
                                     sr_m11 = sr_m11 / unwrapped_model_ae.config.scaling_factor
                                     sr_m11 = unwrapped_model_ae.decode(sr_m11, return_dict=False)[0].clamp(-1, 1)
                                     
@@ -1083,10 +1552,16 @@ def main(config_path):
                 logs = {
                     "loss": loss.detach().item(), 
                     "lr": lr_scheduler.get_last_lr()[0], 
-                    "v_loss": loss.item()
+                    "v_loss": distill_loss_log.item()
                 }
                 if repa_projector is not None:
                     logs["repa_loss"] = repa_loss.detach().item()
+                if fd_loss is not None:
+                    logs["fd_loss"] = fd_loss.detach().item()
+                    logs.update(fd_logs)
+                if ocr_repa_loss is not None:
+                    logs["ocr_repa_loss"] = ocr_repa_loss.detach().item()
+                    logs.update(ocr_repa_logs)
                 progress_bar.set_postfix(**logs)
                 
             log_loss_steps = getattr(args, "log_loss_steps", 250)
@@ -1094,10 +1569,16 @@ def main(config_path):
                 logs = {
                     "loss": loss.detach().item(), 
                     "lr": lr_scheduler.get_last_lr()[0], 
-                    "v_loss": loss.item()
+                    "v_loss": distill_loss_log.item()
                 }
                 if repa_projector is not None:
                     logs["repa_loss"] = repa_loss.detach().item()
+                if fd_loss is not None:
+                    logs["fd_loss"] = fd_loss.detach().item()
+                    logs.update(fd_logs)
+                if ocr_repa_loss is not None:
+                    logs["ocr_repa_loss"] = ocr_repa_loss.detach().item()
+                    logs.update(ocr_repa_logs)
                 accelerator.log(logs, step=global_step)
 
     gc.enable()

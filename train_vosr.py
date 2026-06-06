@@ -5,6 +5,14 @@ import logging
 from collections import OrderedDict
 from tqdm import tqdm
 from models.lightningdit import LightningDiT
+from models.codsr_guidance import ChannelwiseSobel, build_ragp_weight
+from models.vae_encoder_lora import (
+    VAEEncoderLoRAWrapper,
+    configure_vae_encoder_lora,
+    encode_lq_hq_latents,
+    get_vae_lora_state_dict,
+    vae_lora_parameters,
+)
 from pathlib import Path
 from vosr import VOSR
 from datasets import load_dataset
@@ -421,6 +429,21 @@ def main(config_path):
 
     model_ae = model_ae.to(accelerator.device)
     model_ae.eval()
+    use_vae_encoder_lora = bool(getattr(args, "use_vae_encoder_lora", False))
+    if use_vae_encoder_lora:
+        vae_lora_targets = configure_vae_encoder_lora(
+            model_ae,
+            rank=int(getattr(args, "vae_lora_rank", 4)),
+            weight_path=getattr(args, "vae_lora_ckpt", None),
+            trainable=True,
+        )
+        if accelerator.is_main_process:
+            logger.info(
+                f"===========> VAE encoder LoRA enabled: rank={getattr(args, 'vae_lora_rank', 4)}, "
+                f"targets={len(vae_lora_targets)}, "
+                f"lr={getattr(args, 'vae_lora_learning_rate', args.learning_rate)}"
+            )
+        model_ae = VAEEncoderLoRAWrapper(model_ae, args.ae_type)
 
     if accelerator.is_main_process:
         if args.output_dir is not None:
@@ -446,21 +469,39 @@ def main(config_path):
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list), 
         use_checkpoint=getattr(args, "use_checkpoint", False),
+        use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
+        lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
     total_params_in_billion = total_params / 1e9
     if accelerator.is_main_process:
         logger.info(f"===========> Total parameters: {total_params} ({total_params_in_billion:.3f} B)")
+        if getattr(args, "use_codsr_ragp", False):
+            logger.info("===========> CODSR RAGP enabled")
+        if getattr(args, "use_lq_token_modulation", False):
+            logger.info("===========> CODSR LQ token modulation enabled")
 
     model.train()
+    ragp_sobel = None
+    if getattr(args, "use_codsr_ragp", False):
+        ragp_sobel = ChannelwiseSobel(mode="fast").to(accelerator.device)
 
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         return model
 
     # Optimizer creation
-    params_to_optimize = model.parameters()
+    if use_vae_encoder_lora:
+        params_to_optimize = [
+            {"params": model.parameters(), "lr": args.learning_rate},
+            {
+                "params": vae_lora_parameters(model_ae),
+                "lr": float(getattr(args, "vae_lora_learning_rate", args.learning_rate)),
+            },
+        ]
+    else:
+        params_to_optimize = model.parameters()
 
     if args.use_8bit_adam:
         try:
@@ -588,6 +629,7 @@ def main(config_path):
     model, model_ae, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
         model, model_ae, optimizer, train_dataloader, lr_scheduler
     )
+    accumulate_models = (model, model_ae) if use_vae_encoder_lora else (model,)
 
     if resume_path:
         global_step = current_step
@@ -688,7 +730,12 @@ def main(config_path):
     )
     progress_bar.set_description("Training")
     epoch = 0
-    unwrapped_model_ae = accelerator.unwrap_model(model_ae)
+    unwrapped_model_ae_container = accelerator.unwrap_model(model_ae)
+    unwrapped_model_ae = (
+        unwrapped_model_ae_container.vae
+        if use_vae_encoder_lora
+        else unwrapped_model_ae_container
+    )
     
     unwrapped_venc = accelerator.unwrap_model(venc)
     if args.ae_type == "qwen":
@@ -715,6 +762,7 @@ def main(config_path):
             with torch.no_grad():
                 _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
+                lq_image_m11 = lq
                 
             with torch.no_grad():
                 with accelerator.autocast():
@@ -725,26 +773,50 @@ def main(config_path):
                     z[-1] = x_norm
                     z = [z[i] for i in args.layer_dinov2b_list]
                     
-            with accelerator.accumulate(model):
+            with accelerator.accumulate(*accumulate_models):
                 if global_step >= args.max_train_steps:
                     break
                     
+                if use_vae_encoder_lora:
+                    with accelerator.autocast():
+                        lq, hq = model_ae(lq, hq)
+                else:
+                    lq, hq = encode_lq_hq_latents(
+                        unwrapped_model_ae,
+                        lq,
+                        hq,
+                        args.ae_type,
+                        latents_mean=latents_mean if args.ae_type == "qwen" else None,
+                        latents_std=latents_std if args.ae_type == "qwen" else None,
+                    )
                 with torch.no_grad():
-                    combined = torch.cat([lq, hq], dim=0)
-                    if args.ae_type == 'qwen':
-                        combined_latent = (unwrapped_model_ae.encode(combined).latent_dist.sample() - latents_mean) * latents_std
-                    elif args.ae_type == 'sd2':
-                        combined_latent = unwrapped_model_ae.encode(combined.to(unwrapped_model_ae.dtype)).latent_dist.sample() * unwrapped_model_ae.config.scaling_factor
-                    lq, hq = combined_latent.chunk(2, dim=0)
+                    ragp_weight = None
+                    if getattr(args, "use_codsr_ragp", False):
+                        ragp_weight = build_ragp_weight(
+                            lq_image_m11,
+                            target_hw8=lq.shape[-2:],
+                            sobel_layer=ragp_sobel,
+                        )
+                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
                 
                 with accelerator.autocast():
-                    loss, loss_backward = vosr.loss_fm(model, lq, hq, z)
+                    loss, loss_backward = vosr.loss_fm(
+                        model,
+                        lq,
+                        hq,
+                        z,
+                        ragp_weight=ragp_weight,
+                        lq_mod=lq_mod,
+                    )
                 
                 # Backward and optimize
                 accelerator.backward(loss_backward)
                 
                 if accelerator.sync_gradients and args.max_grad_norm > 0:
-                    accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    params_to_clip = list(model.parameters())
+                    if use_vae_encoder_lora:
+                        params_to_clip.extend(vae_lora_parameters(unwrapped_model_ae))
+                    accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -772,8 +844,13 @@ def main(config_path):
                         unwrapped_model = accelerator.unwrap_model(model)
                         model_state_cpu = {k: v.cpu().clone() for k, v in unwrapped_model.state_dict().items()}
                         ema_state_cpu = {k: v.cpu().clone() for k, v in ema.state_dict().items()} if args.use_ema else None
+                        vae_lora_state_cpu = (
+                            get_vae_lora_state_dict(unwrapped_model_ae)
+                            if use_vae_encoder_lora
+                            else None
+                        )
                         
-                        def save_clean_weights(model_state, ema_state, save_dir):
+                        def save_clean_weights(model_state, ema_state, vae_lora_state, save_dir):
                             os.makedirs(save_dir, exist_ok=True)
                             clean_model_dir = f"{save_dir}/clean_weights"
                             os.makedirs(clean_model_dir, exist_ok=True)
@@ -781,10 +858,15 @@ def main(config_path):
                             save_file(model_state, f"{clean_model_dir}/model.safetensors")
                             if ema_state is not None:
                                 save_file(ema_state, f"{clean_model_dir}/ema_model.safetensors")
+                            if vae_lora_state is not None:
+                                save_file(
+                                    vae_lora_state,
+                                    f"{clean_model_dir}/vae_encoder_lora.safetensors",
+                                )
                         
                         save_thread = threading.Thread(
                             target=save_clean_weights,
-                            args=(model_state_cpu, ema_state_cpu, ckpt_dir),
+                            args=(model_state_cpu, ema_state_cpu, vae_lora_state_cpu, ckpt_dir),
                             daemon=False,
                         )
                         save_thread.start()
@@ -819,6 +901,7 @@ def main(config_path):
 
                                 lq = to_tensor(lq_img).unsqueeze(0).to(accelerator.device)  # [0, 1]
                                 lq = lq * 2.0 - 1.0  # [-1, 1]
+                                lq_image_m11 = lq
 
                                 with Image.open(gt_path) as img:
                                     rgb_img = img.convert("RGB")
@@ -836,12 +919,16 @@ def main(config_path):
 
                                 if args.ae_type == 'qwen':
                                     lq = (unwrapped_model_ae.encode(lq).latent_dist.sample() - latents_mean) * latents_std
-                                    sr_m11 = vosr.sample_multistep_fm(ema, lq, n_steps=args.infer_steps, venc_fea=z)
+                                    ragp_weight = build_ragp_weight(lq_image_m11, target_hw8=lq.shape[-2:], sobel_layer=ragp_sobel) if getattr(args, "use_codsr_ragp", False) else None
+                                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
+                                    sr_m11 = vosr.sample_multistep_fm(ema, lq, n_steps=args.infer_steps, venc_fea=z, ragp_weight=ragp_weight, lq_mod=lq_mod)
                                     sr_m11 = sr_m11 / latents_std + latents_mean
                                     sr_m11 = unwrapped_model_ae.decode(sr_m11, return_dict=False)[0].clamp(-1, 1)
                                 elif args.ae_type == 'sd2':
                                     lq = unwrapped_model_ae.encode(lq).latent_dist.sample() * unwrapped_model_ae.config.scaling_factor
-                                    sr_m11 = vosr.sample_multistep_fm(ema, lq, n_steps=args.infer_steps, venc_fea=z)
+                                    ragp_weight = build_ragp_weight(lq_image_m11, target_hw8=lq.shape[-2:], sobel_layer=ragp_sobel) if getattr(args, "use_codsr_ragp", False) else None
+                                    lq_mod = lq_image_m11 if getattr(args, "use_lq_token_modulation", False) else None
+                                    sr_m11 = vosr.sample_multistep_fm(ema, lq, n_steps=args.infer_steps, venc_fea=z, ragp_weight=ragp_weight, lq_mod=lq_mod)
                                     sr_m11 = sr_m11 / unwrapped_model_ae.config.scaling_factor
                                     sr_m11 = unwrapped_model_ae.decode(sr_m11, return_dict=False)[0].clamp(-1, 1)
                                     

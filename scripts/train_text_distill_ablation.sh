@@ -6,6 +6,9 @@ set -euo pipefail
 # Usage:
 #   bash scripts/train_text_distill_ablation.sh full_target_no_rc
 #   bash scripts/train_text_distill_ablation.sh guided_target_no_rc
+#   bash scripts/train_text_distill_ablation.sh guided_target_no_rc_fd
+#   bash scripts/train_text_distill_ablation.sh guided_target_shortcut
+#   bash scripts/train_text_distill_ablation.sh guided_target_shortcut_fd
 #   bash scripts/train_text_distill_ablation.sh guided_target_rc
 #   bash scripts/train_text_distill_ablation.sh all
 #
@@ -30,12 +33,22 @@ case "${EXP}" in
   guided_target_no_rc)
     run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc.yml"
     ;;
+  guided_target_no_rc_fd)
+    run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_fd.yml"
+    ;;
+  guided_target_shortcut)
+    run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_shortcut.yml"
+    ;;
+  guided_target_shortcut_fd)
+    run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_shortcut_fd.yml"
+    ;;
   guided_target_rc)
     run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_rc.yml"
     ;;
   all)
     run_one "${CONFIG_ROOT}/VOSR_0.5B_text_full_target_no_rc.yml"
     run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc.yml"
+    run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_shortcut.yml"
     run_one "${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_rc.yml"
     ;;
   *)

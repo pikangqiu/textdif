@@ -20,6 +20,11 @@ sys.path.append(os.getcwd())
 
 from models.lightningdit import LightningDiT
 from models.light_decoder import LightDecoder
+from models.codsr_guidance import build_ragp_weight
+from models.vae_encoder_lora import (
+    configure_vae_encoder_lora,
+    resolve_vae_lora_path,
+)
 from vosr import VOSR
 
 IMAGENET_DEFAULT_MEAN = (0.485, 0.456, 0.406)
@@ -252,6 +257,8 @@ def tiled_latent_inference(
         lq_latent, latents_mean, latents_std = _encode_latent(vae, lq_tensor, args, device)
 
     _, lc, lh, lw = lq_latent.shape
+    ragp_weight = build_ragp_weight(lq_tensor, target_hw8=lq_latent.shape[-2:]) if getattr(args, "use_codsr_ragp", False) else None
+    lq_mod = lq_tensor if getattr(args, "use_lq_token_modulation", False) else None
 
     # --- Pixel tile params -> latent tile params (aligned to patch_size) ---
     lt_size = max((args.tile_size // AE_FACTOR // patch_size) * patch_size, patch_size)
@@ -265,14 +272,17 @@ def tiled_latent_inference(
         with torch.no_grad():
             z_fea = get_venc_features(venc, lq_tensor, args) if venc is not None else None
             z = torch.randn_like(lq_latent)
+            lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
             n_steps = args.infer_steps
             t_seq = torch.linspace(1., 0., n_steps + 1, device=device)
             for i in range(n_steps):
                 t_cur, t_nxt = t_seq[i], t_seq[i + 1]
                 u = model(torch.cat([lq_latent, z], 1),
-                          t_cur.expand(b), t_nxt.expand(b), z_fea)
+                          t_cur.expand(b), t_nxt.expand(b), z_fea, lq_mod=lq_mod)
                 z = z - (t_cur - t_nxt) * u
             return _decode_latent(vae, z, args, latents_mean, latents_std, light_decoder)
+
+    lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
 
     # --- Build tile grid & Gaussian weights ---
     h_pos = _make_tile_grid(lh, lt_size, lt_overlap)
@@ -319,7 +329,13 @@ def tiled_latent_inference(
                                      z[:, :, hi:he, wi:we]], dim=1)
 
                     z_fea_tile = tile_venc.get((hi, wi))
-                    u_tile = model(inp, t_cur.expand(b), t_nxt.expand(b), z_fea_tile)
+                    lq_mod_tile = None
+                    if lq_mod is not None:
+                        ph_s, pw_s = hi * AE_FACTOR, wi * AE_FACTOR
+                        ph_e = min((hi + lt_size) * AE_FACTOR, lq_tensor.shape[2])
+                        pw_e = min((wi + lt_size) * AE_FACTOR, lq_tensor.shape[3])
+                        lq_mod_tile = lq_tensor[:, :, ph_s:ph_e, pw_s:pw_e]
+                    u_tile = model(inp, t_cur.expand(b), t_nxt.expand(b), z_fea_tile, lq_mod=lq_mod_tile)
 
                     u_acc[:, :, hi:he, wi:we] += u_tile * g_weight
                     w_acc[:, :, hi:he, wi:we] += g_weight
@@ -345,6 +361,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--force_rerun', action='store_true')
     parser.add_argument('--config', type=str, default='')
+    parser.add_argument('--vae_lora_ckpt', type=str, default=None)
 
     temp_args, _ = parser.parse_known_args()
     args = load_config_with_cli(temp_args.checkpoint, parser)
@@ -387,6 +404,23 @@ def main():
         from diffusers import AutoencoderKL
         vae = AutoencoderKL.from_pretrained(ae_path, subfolder="vae")
     vae.to(device).eval()
+    vae_lora_path = resolve_vae_lora_path(
+        args.checkpoint,
+        getattr(args, "vae_lora_ckpt", None),
+    )
+    if bool(getattr(args, "use_vae_encoder_lora", False)) and vae_lora_path is None:
+        raise FileNotFoundError(
+            "This experiment requires VAE encoder LoRA, but no "
+            "vae_encoder_lora.safetensors checkpoint was found."
+        )
+    if vae_lora_path is not None:
+        configure_vae_encoder_lora(
+            vae,
+            rank=int(getattr(args, "vae_lora_rank", 4)),
+            weight_path=vae_lora_path,
+            trainable=False,
+        )
+        print(f"Loaded VAE encoder LoRA from {vae_lora_path}")
 
     # 2. Load LightDecoder (sd2 only)
     light_decoder = None
@@ -426,6 +460,8 @@ def main():
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
         num_fused_layers=len(args.layer_dinov2b_list),
+        use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
+        lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
     )
 
     search_dirs = [
@@ -443,7 +479,11 @@ def main():
         if weight_path:
             break
     if weight_path is None:
-        hits = glob.glob(os.path.join(args.checkpoint, "**/*.safetensors"), recursive=True)
+        hits = [
+            path
+            for path in glob.glob(os.path.join(args.checkpoint, "**/*.safetensors"), recursive=True)
+            if os.path.basename(path) != "vae_encoder_lora.safetensors"
+        ]
         if not hits:
             raise FileNotFoundError(f"No .safetensors found under {args.checkpoint}")
         weight_path = hits[0]
@@ -495,7 +535,16 @@ def main():
                 with torch.no_grad():
                     lq_latent, latents_mean, latents_std = _encode_latent(vae, lq, args, device)
                     z_fea = get_venc_features(venc, lq, args)
-                    sr_latent = sample_fn(model, lq_latent, n_steps=args.infer_steps, venc_fea=z_fea)
+                    ragp_weight = build_ragp_weight(lq, target_hw8=lq_latent.shape[-2:]) if getattr(args, "use_codsr_ragp", False) else None
+                    lq_mod = lq if getattr(args, "use_lq_token_modulation", False) else None
+                    sr_latent = sample_fn(
+                        model,
+                        lq_latent,
+                        n_steps=args.infer_steps,
+                        venc_fea=z_fea,
+                        ragp_weight=ragp_weight,
+                        lq_mod=lq_mod,
+                    )
                     sr_tensor = _decode_latent(vae, sr_latent, args, latents_mean, latents_std, light_decoder)
 
             sr_img = transforms.ToPILImage()(sr_tensor[0].cpu() * 0.5 + 0.5)

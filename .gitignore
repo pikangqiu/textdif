@@ -12,17 +12,25 @@ env/
 
 logs/
 wandb/
-exp_vosr/
-exp_vosr_text/
-exp_vosr_text_distill/
-exp_vosr_text_distill_ablation/
+exp_vosr*/
 preset/ckpts/
-preset/datasets/ScreenSR/
+preset/datasets/
+preset/fd_stats/
 preset/results/
+
+# vendored third-party OCR repo (7.7G, has its own .git; kept on disk, not tracked)
+PaddleOCR2Pytorch/
+
+# stray downloaded pages
+index.html*
+.codex
 
 *.pth
 *.pt
 *.ckpt
 *.safetensors
 *.tar
+*.tar.gz
+*.gz
 *.zip
+*.npz

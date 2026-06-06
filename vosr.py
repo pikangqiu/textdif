@@ -80,7 +80,7 @@ class VOSR(nn.Module):
         r = t.detach() * (1. - g)
         return t, r
 
-    def _prepare_cfg_conditions(self, B, device, lq, z, cond_strength_aelq):
+    def _prepare_cfg_conditions(self, B, device, lq, z, cond_strength_aelq, lq_noise=None):
         """Prepare lq_weak/lq_noised/lq_mixed and z_weak/z_noised/z_mixed for CFG training.
         Fixed: use_aelq=True, use_venc=True, weak_cond_strength_venc=0, cond_strength_venc=1.
         """
@@ -88,8 +88,10 @@ class VOSR(nn.Module):
         cfg_indices = (cfg_mask > 0).nonzero(as_tuple=True)[0]
 
         weak_cond_strength_aelq = random.uniform(self.args.weak_cond_strength_aelq_list[0], self.args.weak_cond_strength_aelq_list[1])
+        if lq_noise is None:
+            lq_noise = torch.randn_like(lq)
         lq_weak = self.interpolate(lq, torch.zeros_like(lq), weak_cond_strength_aelq, self.interp_type)
-        lq_noised = self.interpolate(lq, torch.randn_like(lq), cond_strength_aelq, interp_type='sph')
+        lq_noised = self.interpolate(lq, lq_noise, cond_strength_aelq, interp_type='sph')
         lq_mixed = lq_noised.clone()
         lq_mixed[cfg_indices] = lq_weak[cfg_indices]
 
@@ -106,13 +108,15 @@ class VOSR(nn.Module):
 
         return cfg_indices, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed
 
-    def _prepare_cfg_conditions_distill(self, B, device, lq, z, cond_strength_aelq):
+    def _prepare_cfg_conditions_distill(self, B, device, lq, z, cond_strength_aelq, lq_noise=None):
         """Same as _prepare_cfg_conditions but uses args.weak_cond_strength_aelq (scalar) for distill losses."""
         cfg_mask = torch.rand(B, device=device) < self.cfg_ratio
         cfg_indices = (cfg_mask > 0).nonzero(as_tuple=True)[0]
 
+        if lq_noise is None:
+            lq_noise = torch.randn_like(lq)
         lq_weak = self.interpolate(lq, torch.zeros_like(lq), self.args.weak_cond_strength_aelq, self.interp_type)
-        lq_noised = self.interpolate(lq, torch.randn_like(lq), cond_strength_aelq, interp_type='sph')
+        lq_noised = self.interpolate(lq, lq_noise, cond_strength_aelq, interp_type='sph')
         lq_mixed = lq_noised.clone()
         lq_mixed[cfg_indices] = lq_weak[cfg_indices]
 
@@ -126,25 +130,70 @@ class VOSR(nn.Module):
 
         return cfg_indices, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed
 
-    def _teacher_target(self, model, model_tea, t, t_, lq_noised, lq_weak, z_t, z_noised, z_weak, z_mixed, v_target):
+    def _prepare_lq_mod_conditions(self, lq_mod, cfg_indices=None):
+        """Prepare CODSR-style LQ modulation conditions for cond/weak/mixed paths."""
+        if lq_mod is None:
+            return None, None, None
+        if hasattr(self.args, "weak_cond_strength_aelq"):
+            weak_strength = self.args.weak_cond_strength_aelq
+        else:
+            weak_list = getattr(self.args, "weak_cond_strength_aelq_list", [0.05, 0.25])
+            weak_strength = sum(weak_list) / len(weak_list)
+        lq_mod_cond = lq_mod
+        lq_mod_weak = self.interpolate(lq_mod, torch.zeros_like(lq_mod), weak_strength, self.interp_type)
+        lq_mod_mixed = lq_mod_cond.clone()
+        if cfg_indices is not None and len(cfg_indices) > 0:
+            lq_mod_mixed[cfg_indices] = lq_mod_weak[cfg_indices]
+        return lq_mod_cond, lq_mod_weak, lq_mod_mixed
+
+    def _make_ragp_lq_noise(self, lq, ragp_weight):
+        """CODSR RAGP: spatially scale the noise injected into the LQ latent condition."""
+        if ragp_weight is None:
+            return None
+        return torch.randn_like(lq) * ragp_weight.to(device=lq.device, dtype=lq.dtype)
+
+    def _apply_ragp_to_lq_for_sampling(self, lq, ragp_weight):
+        """Use a mild CODSR-style RAGP noised LQ condition during inference."""
+        if ragp_weight is None:
+            return lq
+        strength = float(getattr(self.args, "ragp_infer_cond_strength", 0.993))
+        lq_noise = self._make_ragp_lq_noise(lq, ragp_weight)
+        return self.interpolate(lq, lq_noise, strength, interp_type="sph")
+
+    def _teacher_target(
+        self,
+        model,
+        model_tea,
+        t,
+        t_,
+        lq_noised,
+        lq_weak,
+        z_t,
+        z_noised,
+        z_weak,
+        z_mixed,
+        v_target,
+        lq_mod_cond=None,
+        lq_mod_weak=None,
+    ):
         """Compute teacher/self-distill target v with CFG."""
         with torch.no_grad():
             inp_cond = torch.cat([lq_noised, z_t], dim=1)
             inp_weak = torch.cat([lq_weak, z_t], dim=1)
             omega = torch.where((t_ >= self.t_start) & (t_ <= self.t_end), self.cfg_scale, 1.0)
             if model_tea is not None:
-                v_cond = model_tea(inp_cond, t=t, z=z_noised)
-                v_weak_pred = model_tea(inp_weak, t=t, z=z_weak)
+                v_cond = model_tea(inp_cond, t=t, z=z_noised, lq_mod=lq_mod_cond)
+                v_weak_pred = model_tea(inp_weak, t=t, z=z_weak, lq_mod=lq_mod_weak)
                 v = v_weak_pred + omega * (v_cond - v_weak_pred)
             else:
                 v_cond = v_target
-                v_weak_pred = model(inp_weak, t=t, r=t, z=z_weak)
+                v_weak_pred = model(inp_weak, t=t, r=t, z=z_weak, lq_mod=lq_mod_weak)
                 v = v_weak_pred + omega * (v_cond - v_weak_pred)
         return v
 
     # ──────────────────── Training losses ──────────────────── #
 
-    def loss_fm(self, model, lq, hq, z=None, weight_dtype=None):
+    def loss_fm(self, model, lq, hq, z=None, weight_dtype=None, ragp_weight=None, lq_mod=None):
         B, device = hq.size(0), hq.device
         if self.time_dist[0] == 'uniform':
             t = torch.rand(B, device=device)
@@ -159,19 +208,33 @@ class VOSR(nn.Module):
         cond_strength_aelq = rearrange(cond_strength_aelq, "b -> b 1 1 1")
 
         eps = torch.randn_like(lq)
+        lq_noise = self._make_ragp_lq_noise(lq, ragp_weight)
 
-        _, _, _, lq_mixed, _, _, z_mixed = self._prepare_cfg_conditions(B, device, lq, z, cond_strength_aelq)
+        cfg_indices, _, _, lq_mixed, _, _, z_mixed = self._prepare_cfg_conditions(
+            B, device, lq, z, cond_strength_aelq, lq_noise=lq_noise
+        )
+        _, _, lq_mod_mixed = self._prepare_lq_mod_conditions(lq_mod, cfg_indices)
 
         z_t = (1 - t_) * hq + t_ * eps
         inp = torch.cat([lq_mixed, z_t], dim=1)
 
         v = eps - hq
-        v_current = model(inp, t, z=z_mixed)
+        v_current = model(inp, t, z=z_mixed, lq_mod=lq_mod_mixed)
         v_error = v_current - v
         loss = (v_error ** 2).mean()
         return loss, loss
 
-    def loss_fm_distill_shortcut_improved(self, model, lq, hq, z=None, model_tea=None, return_aux=False):
+    def loss_fm_distill_shortcut_improved(
+        self,
+        model,
+        lq,
+        hq,
+        z=None,
+        model_tea=None,
+        return_aux=False,
+        ragp_weight=None,
+        lq_mod=None,
+    ):
         B, device = hq.size(0), hq.device
         t, r = self.sample_t_r_v1(B, device)
         t_ = rearrange(t, "b -> b 1 1 1")
@@ -181,43 +244,82 @@ class VOSR(nn.Module):
         cond_strength_aelq = rearrange(cond_strength_aelq, "b -> b 1 1 1")
 
         eps = torch.randn_like(lq)
-        _, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed = self._prepare_cfg_conditions_distill(B, device, lq, z, cond_strength_aelq)
+        lq_noise = self._make_ragp_lq_noise(lq, ragp_weight)
+        cfg_indices, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed = self._prepare_cfg_conditions_distill(
+            B, device, lq, z, cond_strength_aelq, lq_noise=lq_noise
+        )
+        lq_mod_cond, lq_mod_weak, lq_mod_mixed = self._prepare_lq_mod_conditions(lq_mod, cfg_indices)
 
         z_t = (1 - t_) * hq + t_ * eps
         v_target = eps - hq
         inp_mixed = torch.cat([lq_mixed, z_t], dim=1)
 
-        v = self._teacher_target(model, model_tea, t, t_, lq_noised, lq_weak, z_t, z_noised, z_weak, z_mixed, v_target)
+        v = self._teacher_target(
+            model,
+            model_tea,
+            t,
+            t_,
+            lq_noised,
+            lq_weak,
+            z_t,
+            z_noised,
+            z_weak,
+            z_mixed,
+            v_target,
+            lq_mod_cond=lq_mod_cond,
+            lq_mod_weak=lq_mod_weak,
+        )
 
         return_hidden_at = getattr(self.args, "repa_layer", None) if return_aux else None
         v_current, student_hidden = self._split_model_output(
-            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at)
+            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at, lq_mod=lq_mod_mixed)
         )
         v_loss = ((v_current - v) ** 2).mean()
 
         with torch.no_grad():
             s = (t + r) / 2
             inp_i = torch.cat([lq_mixed, z_t], dim=1)
-            v1 = model(inp_i, t=t, r=s, z=z_mixed)
+            v1 = model(inp_i, t=t, r=s, z=z_mixed, lq_mod=lq_mod_mixed)
 
             z_s = z_t - (t_-r_)/2*v1
             inp_i = torch.cat([lq_mixed, z_s], dim=1)
-            v2 = model(inp_i, t=s, r=r, z=z_mixed)
+            v2 = model(inp_i, t=s, r=r, z=z_mixed, lq_mod=lq_mod_mixed)
 
             integral_approx = (v1 + v2) / 2
 
-        u_current = model(inp_mixed, t, r, z_mixed)
+        u_current = model(inp_mixed, t, r, z_mixed, lq_mod=lq_mod_mixed)
         u_loss = ((u_current - stopgrad(integral_approx)) ** 2).mean()
 
         loss = v_loss + self.u_weight * u_loss
         if return_aux:
-            return loss, loss, {"student_hidden": student_hidden}
+            return loss, loss, {
+                "student_hidden": student_hidden,
+                "v_current": v_current,
+                "z_t": z_t,
+                "t": t,
+            }
         return loss, loss
 
-    def _rcgm_consistency(self, model, rng_state, inp_mixed, lq_mixed, z_t, z_mixed, t, r, t_, r_, v, DELTA_T, RCGM_N):
+    def _rcgm_consistency(
+        self,
+        model,
+        rng_state,
+        inp_mixed,
+        lq_mixed,
+        z_t,
+        z_mixed,
+        t,
+        r,
+        t_,
+        r_,
+        v,
+        DELTA_T,
+        RCGM_N,
+        lq_mod_mixed=None,
+    ):
         """Compute RCGM consistency loss."""
         torch.cuda.set_rng_state(rng_state)
-        u_current = model(inp_mixed, t=t, r=r, z=z_mixed)
+        u_current = model(inp_mixed, t=t, r=r, z=z_mixed, lq_mod=lq_mod_mixed)
 
         with torch.no_grad():
             delta = DELTA_T
@@ -236,7 +338,7 @@ class VOSR(nn.Module):
 
                 torch.cuda.set_rng_state(rng_state)
                 inp_step = torch.cat([lq_mixed, z_cur], dim=1)
-                v_step = model(inp_step, t=t_step_.reshape(-1), r=t_next_.reshape(-1), z=z_mixed)
+                v_step = model(inp_step, t=t_step_.reshape(-1), r=t_next_.reshape(-1), z=z_mixed, lq_mod=lq_mod_mixed)
 
                 z_cur = z_cur - dt * v_step
                 Ft_tar = Ft_tar + v_step * dt
@@ -253,7 +355,17 @@ class VOSR(nn.Module):
         u_loss = ((u_current - stopgrad(rcgm_target)) ** 2).mean()
         return u_loss
 
-    def loss_fm_distill_rcgm_improved(self, model, lq, hq, z=None, model_tea=None, return_aux=False):
+    def loss_fm_distill_rcgm_improved(
+        self,
+        model,
+        lq,
+        hq,
+        z=None,
+        model_tea=None,
+        return_aux=False,
+        ragp_weight=None,
+        lq_mod=None,
+    ):
         B, device = hq.size(0), hq.device
         DELTA_T = getattr(self.args, 'rcgm_delta_t', 0.01)
         RCGM_N = getattr(self.args, 'rcgm_n_steps', 2)
@@ -265,26 +377,64 @@ class VOSR(nn.Module):
         cond_strength_aelq = rearrange(cond_strength_aelq, "b -> b 1 1 1")
 
         eps = torch.randn_like(lq)
-        _, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed = self._prepare_cfg_conditions_distill(B, device, lq, z, cond_strength_aelq)
+        lq_noise = self._make_ragp_lq_noise(lq, ragp_weight)
+        cfg_indices, lq_weak, lq_noised, lq_mixed, z_weak, z_noised, z_mixed = self._prepare_cfg_conditions_distill(
+            B, device, lq, z, cond_strength_aelq, lq_noise=lq_noise
+        )
+        lq_mod_cond, lq_mod_weak, lq_mod_mixed = self._prepare_lq_mod_conditions(lq_mod, cfg_indices)
 
         z_t = (1 - t_) * hq + t_ * eps
         v_target = eps - hq
         inp_mixed = torch.cat([lq_mixed, z_t], dim=1)
 
-        v = self._teacher_target(model, model_tea, t, t_, lq_noised, lq_weak, z_t, z_noised, z_weak, z_mixed, v_target)
+        v = self._teacher_target(
+            model,
+            model_tea,
+            t,
+            t_,
+            lq_noised,
+            lq_weak,
+            z_t,
+            z_noised,
+            z_weak,
+            z_mixed,
+            v_target,
+            lq_mod_cond=lq_mod_cond,
+            lq_mod_weak=lq_mod_weak,
+        )
 
         rng_state = torch.cuda.get_rng_state()
         return_hidden_at = getattr(self.args, "repa_layer", None) if return_aux else None
         v_current, student_hidden = self._split_model_output(
-            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at)
+            model(inp_mixed, t=t, r=t, z=z_mixed, return_hidden_at=return_hidden_at, lq_mod=lq_mod_mixed)
         )
         v_loss = ((v_current - v) ** 2).mean()
 
-        u_loss = self._rcgm_consistency(model, rng_state, inp_mixed, lq_mixed, z_t, z_mixed, t, r, t_, r_, v, DELTA_T, RCGM_N)
+        u_loss = self._rcgm_consistency(
+            model,
+            rng_state,
+            inp_mixed,
+            lq_mixed,
+            z_t,
+            z_mixed,
+            t,
+            r,
+            t_,
+            r_,
+            v,
+            DELTA_T,
+            RCGM_N,
+            lq_mod_mixed=lq_mod_mixed,
+        )
 
         loss = v_loss + self.u_weight * u_loss
         if return_aux:
-            return loss, loss, {"student_hidden": student_hidden}
+            return loss, loss, {
+                "student_hidden": student_hidden,
+                "v_current": v_current,
+                "z_t": z_t,
+                "t": t,
+            }
         return loss, loss
 
     
@@ -292,8 +442,18 @@ class VOSR(nn.Module):
     # ──────────────────── Sampling ──────────────────── #
 
     @torch.no_grad()
-    def sample_onestep(self, model, lq, venc_fea=None, n_steps: int = 8, schedule: str = "linear"):
+    def sample_onestep(
+        self,
+        model,
+        lq,
+        venc_fea=None,
+        n_steps: int = 8,
+        schedule: str = "linear",
+        ragp_weight=None,
+        lq_mod=None,
+    ):
         B, device = lq.size(0), lq.device
+        lq = self._apply_ragp_to_lq_for_sampling(lq, ragp_weight)
         z = torch.randn_like(lq)
 
         if schedule == "linear":
@@ -306,7 +466,7 @@ class VOSR(nn.Module):
         for i in range(n_steps):
             t_cur, t_next = t_seq[i], t_seq[i + 1]
             inp = torch.cat([lq, z], dim=1)
-            u = model(inp, t_cur.repeat(B), t_next.repeat(B), venc_fea)
+            u = model(inp, t_cur.repeat(B), t_next.repeat(B), venc_fea, lq_mod=lq_mod)
             z = z - (t_cur - t_next) * u
 
         return z
@@ -314,14 +474,25 @@ class VOSR(nn.Module):
     
 
     @torch.no_grad()
-    def sample_multistep_fm(self, model, lq, venc_fea=None, n_steps: int = 25, schedule: str = "linear"):
+    def sample_multistep_fm(
+        self,
+        model,
+        lq,
+        venc_fea=None,
+        n_steps: int = 25,
+        schedule: str = "linear",
+        ragp_weight=None,
+        lq_mod=None,
+    ):
         B, device = lq.size(0), lq.device
+        lq = self._apply_ragp_to_lq_for_sampling(lq, ragp_weight)
 
         eps = torch.randn_like(lq)
 
         # CFG condition preparation (cfg_ratio > 0 always)
         weak_cond_strength_aelq = (self.args.weak_cond_strength_aelq_list[0] + self.args.weak_cond_strength_aelq_list[1]) / 2.
         lq_weak = self.interpolate(lq, torch.zeros_like(lq), weak_cond_strength_aelq, self.interp_type)
+        lq_mod_cond, lq_mod_weak, _ = self._prepare_lq_mod_conditions(lq_mod)
 
         # weak_cond_strength_venc=0 => venc_fea_weak is zeros; cond_strength_venc=1 => venc_fea unchanged
         if isinstance(venc_fea, (list, tuple)):
@@ -345,11 +516,14 @@ class VOSR(nn.Module):
             model_inp = torch.cat([lq, z], dim=1)
             model_t = t_cur.repeat(B)
             model_venc_fea = venc_fea
+            model_lq_mod = lq_mod_cond
 
             if t_cur <= self.t_end and t_cur >= self.t_start:
                 inp_weak = torch.cat([lq_weak, z], dim=1)
                 model_inp = torch.cat([model_inp, inp_weak], dim=0)
                 model_t = model_t.repeat(2)
+                if lq_mod is not None:
+                    model_lq_mod = torch.cat([lq_mod_cond, lq_mod_weak], dim=0)
 
                 if venc_fea is not None:
                     if isinstance(venc_fea, (list, tuple)):
@@ -357,7 +531,7 @@ class VOSR(nn.Module):
                     else:
                         model_venc_fea = torch.cat([venc_fea, venc_fea_weak], dim=0)
 
-            d_cur = model(model_inp, model_t, z=model_venc_fea)
+            d_cur = model(model_inp, model_t, z=model_venc_fea, lq_mod=model_lq_mod)
 
             if t_cur <= self.t_end and t_cur >= self.t_start:
                 d_cur_cond, d_cur_weak = d_cur.chunk(2)
