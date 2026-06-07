@@ -1016,6 +1016,10 @@ def main(config_path):
     # Create dataset
     if args.dataset_type == 'txt':
         train_dataset = TxtPairDataset(split='train', args=args)
+        txt_collate_fn = None
+        if getattr(args, 'ocr_use_gt_boxes', False):
+            from dataloaders.realsr_dataset import gt_boxes_collate_fn
+            txt_collate_fn = gt_boxes_collate_fn
         train_dataloader = DataLoader(
             train_dataset,
             batch_size=local_batch_size,
@@ -1024,7 +1028,8 @@ def main(config_path):
             pin_memory=pin_memory,
             drop_last=True,
             persistent_workers=persistent_workers if num_workers > 0 else False,
-            prefetch_factor=prefetch_factor
+            prefetch_factor=prefetch_factor,
+            collate_fn=txt_collate_fn,
         )
     elif args.dataset_type == 'webdataset':
         from dataloaders.realsr_dataset import build_webdataset_pipeline
@@ -1247,6 +1252,7 @@ def main(config_path):
         for batch in train_dataloader:
 
             hq = batch["hq"].to(accelerator.device, non_blocking=True)
+            gt_boxes = batch.get("gt_boxes") if isinstance(batch, dict) else None
             with torch.no_grad():
                 _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
@@ -1395,7 +1401,7 @@ def main(config_path):
 
                     if ocr_active:
                         ocr_repa_loss, ocr_repa_logs = ocr_repa_system.compute_loss(
-                            pred_image_m11, hq_image_m11
+                            pred_image_m11, hq_image_m11, boxes_per_image=gt_boxes
                         )
                         loss = loss + args.ocr_repa_weight * ocr_repa_loss
                         loss_backward = loss

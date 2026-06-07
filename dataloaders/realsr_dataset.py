@@ -53,6 +53,42 @@ class RandomCropTransform:
         return pil_image
 
 
+class RandomCropWithParams:
+    """Like RandomCropTransform but also returns the transform params so callers
+    can map original-image annotations (GT text boxes) into the crop's pixels."""
+
+    def __init__(self, image_size):
+        self.image_size = image_size
+
+    def __call__(self, pil_image: Image.Image):
+        scale = 1.0
+        if min(pil_image.size) < self.image_size:
+            scale = self.image_size / min(pil_image.size)
+            new_size = tuple(round(x * scale) for x in pil_image.size)
+            pil_image = pil_image.resize(new_size, resample=Image.Resampling.BICUBIC)
+
+        max_x = pil_image.width - self.image_size
+        max_y = pil_image.height - self.image_size
+        crop_x = random.randint(0, max_x)
+        crop_y = random.randint(0, max_y)
+        pil_image = pil_image.crop((
+            crop_x, crop_y,
+            crop_x + self.image_size, crop_y + self.image_size
+        ))
+        return pil_image, scale, crop_x, crop_y
+
+
+def gt_boxes_collate_fn(batch):
+    """Collate for the GT-box OCR-REPA path: stack hq, keep gt_boxes as a
+    per-image list of [x1,y1,x2,y2] (variable length, matches the format that
+    OCRRepaSystem._detect_boxes would otherwise produce)."""
+    batch = [b for b in batch if b is not None]
+    out = {"hq": torch.stack([b["hq"] for b in batch], dim=0)}
+    if batch and "gt_boxes" in batch[0]:
+        out["gt_boxes"] = [b["gt_boxes"] for b in batch]
+    return out
+
+
 class TxtPairDataset(Dataset):
     """
     Outputs HQ images as Tensors in [0,1]. Degradation is applied
@@ -66,6 +102,20 @@ class TxtPairDataset(Dataset):
 
         self.gt_list = []
         self.split = split
+
+        # Opt-in GT text-box path (experiment 2a-GT): use real annotated boxes
+        # instead of the online DBNet detector. Default off -> behaves exactly as
+        # before, so the online-detection runs are unaffected.
+        self.use_gt_boxes = bool(getattr(args, 'ocr_use_gt_boxes', False)) and split == 'train'
+        self.gt_boxes_index = None
+        if self.use_gt_boxes:
+            self.gt_crop = RandomCropWithParams(args.resolution)
+            self.gt_min_box_size = int(getattr(args, 'ocr_repa_min_box_size', 8))
+            idx_path = getattr(args, 'ocr_boxes_index_path', 'preset/text_boxes_index.pkl')
+            import pickle
+            with open(idx_path, 'rb') as f:
+                self.gt_boxes_index = pickle.load(f)
+            print(f'=====> loaded GT text-box index: {len(self.gt_boxes_index)} images from {idx_path}')
 
         if self.split == 'train':
             self.random_crop_preproc = transforms.Compose([
@@ -100,6 +150,25 @@ class TxtPairDataset(Dataset):
             im.load()
             return im.convert("RGB")
 
+    def _transform_boxes(self, path, scale, crop_x, crop_y):
+        """Map original-image GT boxes into the current 512px crop. Returns a list
+        of int [x1,y1,x2,y2] kept only if they survive clipping at >= min size."""
+        stem = os.path.splitext(os.path.basename(path))[0]
+        rec = self.gt_boxes_index.get(stem)
+        if not rec:
+            return []
+        S = self.args.resolution
+        out = []
+        for (x1, y1, x2, y2) in rec["boxes"]:
+            nx1 = min(max(x1 * scale - crop_x, 0.0), S)
+            ny1 = min(max(y1 * scale - crop_y, 0.0), S)
+            nx2 = min(max(x2 * scale - crop_x, 0.0), S)
+            ny2 = min(max(y2 * scale - crop_y, 0.0), S)
+            ix1, iy1, ix2, iy2 = int(nx1), int(ny1), int(round(nx2)), int(round(ny2))
+            if (ix2 - ix1) >= self.gt_min_box_size and (iy2 - iy1) >= self.gt_min_box_size:
+                out.append([ix1, iy1, ix2, iy2])
+        return out
+
     def __getitem__(self, idx):
         for retry in range(self.max_retry):
             try:
@@ -107,6 +176,10 @@ class TxtPairDataset(Dataset):
                 path = self.gt_list[current_idx]
 
                 gt_img = self._load_rgb(path)
+                if self.split == 'train' and self.use_gt_boxes:
+                    gt_img, scale, crop_x, crop_y = self.gt_crop(gt_img)
+                    boxes = self._transform_boxes(path, scale, crop_x, crop_y)
+                    return {"hq": self.to_tensor(gt_img), "gt_boxes": boxes}
                 if self.split == 'train':
                     gt_img = self.random_crop_preproc(gt_img)
                 elif self.split == 'test':

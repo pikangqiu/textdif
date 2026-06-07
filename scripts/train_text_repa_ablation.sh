@@ -39,6 +39,9 @@ case "${EXP}" in
   ocr_local)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_local_repa.yml"
     ;;
+  ocr_local_gt)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_local_gt.yml"
+    ;;
   ocr_ctc)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_ctc.yml"
     ;;
@@ -49,7 +52,7 @@ case "${EXP}" in
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_seg_token_repa.yml"
     ;;
   *)
-    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_ctc, seg, or seg_token." >&2
+    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_local_gt, ocr_ctc, seg, or seg_token." >&2
     exit 2
     ;;
 esac
