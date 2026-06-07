@@ -33,12 +33,29 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+import contextlib
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+@contextlib.contextmanager
+def _no_autocast():
+    """Run the frozen OCR det/rec in full precision.
+
+    The loss is computed under the trainer's ``accelerator.autocast()`` (bf16),
+    which makes PaddleOCR's internal convs emit bf16 tensors; its numpy-based
+    postprocess then dies with "unsupported ScalarType BFloat16". Gradients to
+    the prediction image still flow with autocast disabled.
+    """
+    if torch.cuda.is_available():
+        with torch.autocast(device_type="cuda", enabled=False):
+            yield
+    else:
+        yield
 
 
 logger = logging.getLogger("ocr_repa")
@@ -143,7 +160,8 @@ class OCRRepaSystem(nn.Module):
             rgb = (imgs01[i].permute(1, 2, 0).cpu().numpy() * 255.0).astype(np.uint8)
             bgr = rgb[:, :, ::-1].copy()  # PaddleOCR expects BGR (cv2 order)
             try:
-                dt_boxes, _ = self.detector(bgr)
+                with _no_autocast():
+                    dt_boxes, _ = self.detector(bgr)
             except Exception as exc:  # detection must never crash training
                 logger.warning("OCR-REPA detection failed on sample %d: %s", i, exc)
                 dt_boxes = None
@@ -198,9 +216,13 @@ class OCRRepaSystem(nn.Module):
         if self.config.bgr_input:
             x = x[:, [2, 1, 0], :, :]  # RGB -> BGR to match the pretrained recognizer
         x = x.to(self._rec_dtype)
-        feat = self.rec_net.backbone(x)
-        if getattr(self.rec_net, "use_neck", False):
-            feat = self.rec_net.neck(feat)
+        # cuDNN's RNN backward refuses to run while the (frozen) recognizer is in
+        # eval mode; disable cuDNN so the native LSTM, which supports eval-mode
+        # backward, is used and gradients flow back to the prediction crops.
+        with _no_autocast(), torch.backends.cudnn.flags(enabled=False):
+            feat = self.rec_net.backbone(x)
+            if getattr(self.rec_net, "use_neck", False):
+                feat = self.rec_net.neck(feat)
         if isinstance(feat, dict):
             feat = feat.get(self.config.feat_key, next(iter(feat.values())))
         if feat.ndim == 4:  # (N, C, H, W) -> (N, H*W, C)
@@ -208,8 +230,34 @@ class OCRRepaSystem(nn.Module):
         return feat  # (N, T, C)
 
     # ---- public API ------------------------------------------------------
-    def compute_loss(self, pred_image_m11, hr_image_m11):
-        """Return (loss, logs). loss is a zero scalar (no grad) when no text found."""
+    def _prepare_given_boxes(self, boxes_per_image, h, w):
+        """Validate/clip externally provided GT boxes and cap to max_boxes (keeps
+        the largest), so they match the format produced by the detector path."""
+        out = []
+        for boxes in boxes_per_image:
+            cand, areas = [], []
+            for box in (boxes or []):
+                x1, y1, x2, y2 = (int(v) for v in box)
+                x1 = max(0, min(x1, w - 1))
+                y1 = max(0, min(y1, h - 1))
+                x2 = max(x1 + 1, min(x2, w))
+                y2 = max(y1 + 1, min(y2, h))
+                if (x2 - x1) < self.config.min_box_size or (y2 - y1) < self.config.min_box_size:
+                    continue
+                cand.append([x1, y1, x2, y2])
+                areas.append((x2 - x1) * (y2 - y1))
+            if cand:
+                order = np.argsort(areas)[::-1][: self.config.max_boxes]
+                out.append([cand[i] for i in order])
+            else:
+                out.append([])
+        return out
+
+    def compute_loss(self, pred_image_m11, hr_image_m11, boxes_per_image=None):
+        """Return (loss, logs). loss is a zero scalar (no grad) when no text found.
+
+        If ``boxes_per_image`` is given (a per-image list of [x1,y1,x2,y2] in HR
+        pixels, e.g. GT annotations), the online detector is skipped."""
         if pred_image_m11.shape[-2:] != hr_image_m11.shape[-2:]:
             pred_image_m11 = F.interpolate(
                 pred_image_m11.float(),
@@ -218,7 +266,11 @@ class OCRRepaSystem(nn.Module):
                 align_corners=False,
             )
 
-        boxes_per_image = self._detect_boxes(hr_image_m11)
+        if boxes_per_image is None:
+            boxes_per_image = self._detect_boxes(hr_image_m11)
+        else:
+            h, w = hr_image_m11.shape[-2:]
+            boxes_per_image = self._prepare_given_boxes(boxes_per_image, h, w)
         n_boxes = sum(len(b) for b in boxes_per_image)
         if n_boxes == 0:
             zero = pred_image_m11.sum() * 0.0

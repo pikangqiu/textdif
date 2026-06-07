@@ -9,6 +9,8 @@ set -euo pipefail
 #   bash scripts/infer_text_repa_ablation_multigpu.sh
 #   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh dino
 #   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh dino_token
+#   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh ocr_local
+#   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh ocr_ctc
 #   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh seg
 #   GPUS=0 STEP=00020000 bash scripts/infer_text_repa_ablation_multigpu.sh seg_token
 #   GPUS=0,1 bash scripts/infer_text_repa_ablation_multigpu.sh all
@@ -35,6 +37,8 @@ FORCE_RERUN="${FORCE_RERUN:-1}"
 EXP_DINO="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_dino_repa"
 EXP_DINO_TOKEN="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_dino_token_repa"
 EXP_OCR="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_ocr_repa"
+EXP_OCR_LOCAL="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_ocr_local_repa"
+EXP_OCR_CTC="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_ocr_ctc"
 EXP_SEG="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_seg_repa"
 EXP_SEG_TOKEN="exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_seg_token_repa"
 
@@ -93,6 +97,12 @@ case "${EXP}" in
   ocr)
     JOBS=("E_ocr_repa ${EXP_OCR}")
     ;;
+  ocr_local)
+    JOBS=("E2_ocr_local_repa ${EXP_OCR_LOCAL}")
+    ;;
+  ocr_ctc)
+    JOBS=("E3_ocr_ctc ${EXP_OCR_CTC}")
+    ;;
   seg)
     JOBS=("F_seg_repa ${EXP_SEG}")
     ;;
@@ -100,10 +110,10 @@ case "${EXP}" in
     JOBS=("F2_seg_token_repa ${EXP_SEG_TOKEN}")
     ;;
   all)
-    JOBS=("D_dino_repa ${EXP_DINO}" "D2_dino_token_repa ${EXP_DINO_TOKEN}" "E_ocr_repa ${EXP_OCR}" "F_seg_repa ${EXP_SEG}" "F2_seg_token_repa ${EXP_SEG_TOKEN}")
+    JOBS=("D_dino_repa ${EXP_DINO}" "D2_dino_token_repa ${EXP_DINO_TOKEN}" "E_ocr_repa ${EXP_OCR}" "E2_ocr_local_repa ${EXP_OCR_LOCAL}" "E3_ocr_ctc ${EXP_OCR_CTC}" "F_seg_repa ${EXP_SEG}" "F2_seg_token_repa ${EXP_SEG_TOKEN}")
     ;;
   *)
-    echo "Unknown REPA inference experiment: ${EXP}. Expected: dino, dino_token, ocr, seg, seg_token, or all." >&2
+    echo "Unknown REPA inference experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_ctc, seg, seg_token, or all." >&2
     exit 2
     ;;
 esac

@@ -69,6 +69,29 @@ def test_no_text_returns_zero_without_crashing(system):
     assert logs["ocr_repa/n_boxes"] == 0.0
 
 
+def test_compute_loss_with_given_boxes(system):
+    """2a-GT path: when boxes are provided, detection is skipped and the loss is
+    computed on those boxes (differentiable w.r.t. the prediction)."""
+    hr = _text_image()
+    pred = torch.nn.functional.avg_pool2d(hr, 5, 1, 2).clone().detach().requires_grad_(True)
+    boxes = [[[40, 80, 300, 110]]]  # one box per image (B=1), in HR pixels
+    loss, logs = system.compute_loss(pred, hr, boxes_per_image=boxes)
+    assert logs["ocr_repa/n_boxes"] == 1.0
+    assert loss.item() > 0
+    loss.backward()
+    assert torch.isfinite(pred.grad).all()
+    assert pred.grad.abs().sum() > 0
+
+
+def test_given_empty_boxes_returns_zero(system):
+    """Providing empty boxes (no GT text in this crop) must not crash."""
+    hr = _text_image()
+    pred = torch.nn.functional.avg_pool2d(hr, 5, 1, 2).clone().detach().requires_grad_(True)
+    loss, logs = system.compute_loss(pred, hr, boxes_per_image=[[]])
+    assert loss.item() == 0.0
+    assert logs["ocr_repa/n_boxes"] == 0.0
+
+
 def test_ctc_loss_is_differentiable_wrt_prediction(system):
     hr = _text_image()
     pred = torch.nn.functional.avg_pool2d(hr, 5, 1, 2).clone().detach().requires_grad_(True)

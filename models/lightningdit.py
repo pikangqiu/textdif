@@ -525,7 +525,7 @@ class LightningDiT(nn.Module):
         hidden = None
         for block_idx, block in enumerate(self.blocks):
             if use_checkpoint:
-                x = checkpoint(block, x, c0, z, self.feat_rope, use_reentrant=True)
+                x = checkpoint(block, x, c0, z, self.feat_rope, use_reentrant=False)
             else:
                 x = block(x, c0, z, self.feat_rope)
             if return_hidden_at is not None and block_idx == return_hidden_at:
@@ -616,7 +616,7 @@ class LightningDiT(nn.Module):
         hidden = None
         for block_idx, block in enumerate(self.blocks):
             if use_checkpoint:
-                x = checkpoint(block, x, c0, z, feat_rope, use_reentrant=True)
+                x = checkpoint(block, x, c0, z, feat_rope, use_reentrant=False)
             else:
                 x = block(x, c0, z, feat_rope)
             if return_hidden_at is not None and block_idx == return_hidden_at:
