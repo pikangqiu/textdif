@@ -80,6 +80,9 @@ class OCRRepaConfig:
     feat_key: str = "neck_out"
     loss_type: str = "cosine"  # "cosine" | "mse"
     bgr_input: bool = True
+    # Skip building the text detector (and its shapely/pyclipper DB-postprocess
+    # import) when boxes are always supplied externally, e.g. GT-box mode.
+    build_detector: bool = True
 
 
 def _resolve_default_paddle_root() -> str:
@@ -125,14 +128,18 @@ class OCRRepaSystem(nn.Module):
         self.device = device
         _ensure_paddle_on_path(config.paddle_root)
 
-        from tools.infer.predict_det import TextDetector
         from tools.infer.predict_rec import TextRecognizer
 
         use_gpu = torch.cuda.is_available()
         pred_args = _build_predictor_args(config, use_gpu)
 
-        # Detector is only used under no_grad to produce boxes.
-        self.detector = TextDetector(pred_args)
+        # Detector is only used under no_grad to produce boxes. Skip it (and its
+        # shapely/pyclipper import) when boxes are always provided externally.
+        if config.build_detector:
+            from tools.infer.predict_det import TextDetector
+            self.detector = TextDetector(pred_args)
+        else:
+            self.detector = None
         # Recognizer: we only need its differentiable backbone(+neck).
         self.recognizer = TextRecognizer(pred_args)
 
@@ -140,10 +147,11 @@ class OCRRepaSystem(nn.Module):
         self.rec_net.eval()
         for p in self.rec_net.parameters():
             p.requires_grad_(False)
-        # The detector net is likewise frozen.
-        self.detector.net.eval()
-        for p in self.detector.net.parameters():
-            p.requires_grad_(False)
+        # The detector net is likewise frozen (when built).
+        if self.detector is not None:
+            self.detector.net.eval()
+            for p in self.detector.net.parameters():
+                p.requires_grad_(False)
 
         self._rec_dtype = next(self.rec_net.parameters()).dtype
         # CTC blank is index 0 in PaddleOCR recognizers (see CTCLabelDecode).
@@ -153,6 +161,11 @@ class OCRRepaSystem(nn.Module):
     @torch.no_grad()
     def _detect_boxes(self, hr_image_m11):
         """Return a list (len B) of int boxes [[x1, y1, x2, y2], ...] in HR pixels."""
+        if self.detector is None:
+            raise RuntimeError(
+                "OCR detector was not built (build_detector=False). Provide boxes "
+                "via boxes_per_image, or enable the detector."
+            )
         b, _, h, w = hr_image_m11.shape
         imgs01 = (hr_image_m11.detach().float() * 0.5 + 0.5).clamp(0, 1)
         boxes_per_image = []
@@ -324,11 +337,12 @@ class OCRRepaSystem(nn.Module):
             lengths.append(len(out))
         return targets, lengths
 
-    def compute_ctc_loss(self, pred_image_m11, hr_image_m11):
+    def compute_ctc_loss(self, pred_image_m11, hr_image_m11, boxes_per_image=None):
         """CTC loss of the prediction against HR-derived pseudo transcripts.
 
         Returns (loss, logs); a zero scalar (no grad) when no decodable text.
-        """
+        If ``boxes_per_image`` is given (GT annotations, same format as
+        ``compute_loss``), the online detector is skipped."""
         if pred_image_m11.shape[-2:] != hr_image_m11.shape[-2:]:
             pred_image_m11 = F.interpolate(
                 pred_image_m11.float(),
@@ -337,7 +351,11 @@ class OCRRepaSystem(nn.Module):
                 align_corners=False,
             )
 
-        boxes_per_image = self._detect_boxes(hr_image_m11)
+        if boxes_per_image is None:
+            boxes_per_image = self._detect_boxes(hr_image_m11)
+        else:
+            h, w = hr_image_m11.shape[-2:]
+            boxes_per_image = self._prepare_given_boxes(boxes_per_image, h, w)
         n_boxes = sum(len(b) for b in boxes_per_image)
         zero_logs = {"ocr_ctc/loss": 0.0, "ocr_ctc/n_boxes": 0.0, "ocr_ctc/n_used": 0.0}
         if n_boxes == 0:
@@ -406,5 +424,10 @@ def build_ocr_repa_system(args, device) -> OCRRepaSystem:
         feat_key=str(getattr(args, "ocr_repa_feat_key", "neck_out")),
         loss_type=str(getattr(args, "ocr_repa_loss_type", "cosine")),
         bgr_input=bool(getattr(args, "ocr_repa_bgr_input", True)),
+        # GT-box mode supplies boxes from the dataset, so the detector (and its
+        # shapely/pyclipper deps) is not needed. Allow an explicit override too.
+        build_detector=bool(
+            getattr(args, "ocr_build_detector", not getattr(args, "ocr_use_gt_boxes", False))
+        ),
     )
     return OCRRepaSystem(config, device=device)
