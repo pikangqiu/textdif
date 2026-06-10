@@ -164,6 +164,39 @@ def load_dinov2(args, device):
     return encoder
 
 
+# (processor, encoder) for OCR condition injection; set in main() when the
+# checkpoint was trained with use_ocr_cond.
+_OCR_COND = None
+
+
+def load_ocr_cond_encoder(args, device):
+    from transformers import AutoImageProcessor, AutoModel, VisionEncoderDecoderModel
+
+    model_name = getattr(args, "ocr_cond_model", "microsoft/trocr-base-printed")
+    processor = AutoImageProcessor.from_pretrained(model_name)
+    try:
+        encoder = AutoModel.from_pretrained(model_name)
+    except Exception:
+        encoder = VisionEncoderDecoderModel.from_pretrained(model_name)
+    encoder = encoder.to(device).eval()
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+    return processor, encoder
+
+
+@torch.no_grad()
+def extract_ocr_cond_tokens(processor, encoder, image_m11, device):
+    images = ((image_m11.detach().float() + 1.0) * 0.5).clamp(0, 1)
+    images = [img.cpu() for img in images]
+    inputs = processor(images=images, return_tensors="pt", do_rescale=False)
+    pixel_values = inputs["pixel_values"].to(device)
+    if hasattr(encoder, "get_encoder"):
+        outputs = encoder.get_encoder()(pixel_values=pixel_values)
+    else:
+        outputs = encoder(pixel_values=pixel_values)
+    return outputs.last_hidden_state
+
+
 def get_venc_features(venc, lq_tensor, args):
     with torch.no_grad():
         raw_image = (0.5 * lq_tensor + 0.5) * 255
@@ -172,6 +205,9 @@ def get_venc_features(venc, lq_tensor, args):
         z = [v for k, v in features.items() if k.startswith('layer_')]
         z[-1] = x_norm
         z = [z[i] for i in args.layer_dinov2b_list]
+        if _OCR_COND is not None:
+            processor, encoder = _OCR_COND
+            z.append(extract_ocr_cond_tokens(processor, encoder, lq_tensor, lq_tensor.device))
     return z
 
 
@@ -440,6 +476,12 @@ def main():
     # 3. Load Vision Encoder (dinov2)
     venc = load_dinov2(args, device)
 
+    # 3b. OCR condition encoder (only for checkpoints trained with use_ocr_cond)
+    global _OCR_COND
+    if getattr(args, "use_ocr_cond", False):
+        _OCR_COND = load_ocr_cond_encoder(args, device)
+        print(f"OCR condition injection enabled: {getattr(args, 'ocr_cond_model', 'microsoft/trocr-base-printed')}")
+
     # 4. Load DiT Model (distilled student with auxiliary_time_cond)
     base_channel = 4 if args.ae_type == 'sd2' else 16
     model = LightningDiT(
@@ -462,6 +504,8 @@ def main():
         num_fused_layers=len(args.layer_dinov2b_list),
         use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
         lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
+        ocr_cond_dim=(int(getattr(args, "ocr_cond_dim", 768)) if getattr(args, "use_ocr_cond", False) else None),
+        ocr_cond_gate_init=float(getattr(args, "ocr_cond_gate_init", 0.0)),
     )
 
     search_dirs = [

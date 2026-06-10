@@ -27,7 +27,8 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, ProjectConfiguration, set_seed
+from accelerate.utils import DistributedType, ProjectConfiguration, set_seed, InitProcessGroupKwargs
+from datetime import timedelta
 from safetensors.torch import save_file
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version, make_image_grid
@@ -248,8 +249,8 @@ def fd_loss_enabled(args):
     return float(getattr(args, "fd_loss_weight", 0.0)) > 0.0
 
 
-def build_ocr_repa_encoder(args, device):
-    model_name = getattr(args, "repa_ocr_model", None)
+def build_ocr_repa_encoder(args, device, model_name=None):
+    model_name = model_name or getattr(args, "repa_ocr_model", None)
     if not model_name:
         raise ValueError("repa_type='ocr' requires repa_ocr_model in the YAML config.")
     from transformers import AutoImageProcessor, AutoModel, VisionEncoderDecoderModel
@@ -692,6 +693,10 @@ def main(config_path):
             mixed_precision=args.mixed_precision,
             log_with=args.report_to,
             project_config=accelerator_project_config,
+            # Slow/contended boxes can take >10min to load DINO+OCR+teacher and
+            # build the dataset before the first collective; extend the process
+            # group timeout (default 600s) so a slow rank doesn't trip the barrier.
+            kwargs_handlers=[InitProcessGroupKwargs(timeout=timedelta(hours=2))],
         )
 
     print(f'===> choose {len(args.layer_dinov2b_list)} layer fea for CA.')
@@ -806,6 +811,27 @@ def main(config_path):
         tea_total_params = sum(p.numel() for p in model_tea.parameters())
         logger.info(f"===========> Teacher parameters: {tea_total_params} ({tea_total_params / 1e9:.3f} B)")
 
+    # OCR semantic condition stream (student only): a frozen text-recognition
+    # encoder reads the LQ image and its tokens join the DINO tokens in the
+    # student's cross-attention. The teacher stays unchanged and ignores z[1].
+    ocr_cond_processor = None
+    ocr_cond_encoder = None
+    if getattr(args, "use_ocr_cond", False):
+        ocr_cond_processor, ocr_cond_encoder = build_ocr_repa_encoder(
+            args,
+            accelerator.device,
+            model_name=getattr(args, "ocr_cond_model", "microsoft/trocr-base-printed"),
+        )
+        default_cond_dim = getattr(ocr_cond_encoder.config, "hidden_size", None)
+        if default_cond_dim is None and hasattr(ocr_cond_encoder.config, "encoder"):
+            default_cond_dim = getattr(ocr_cond_encoder.config.encoder, "hidden_size", None)
+        args.ocr_cond_dim = int(getattr(args, "ocr_cond_dim", 0) or default_cond_dim or 768)
+        if accelerator.is_main_process:
+            logger.info(
+                f"===========> OCR condition injection enabled: model={getattr(args, 'ocr_cond_model', 'microsoft/trocr-base-printed')} "
+                f"dim={args.ocr_cond_dim} gate_init={float(getattr(args, 'ocr_cond_gate_init', 0.0))}"
+            )
+
     # Student: with auxiliary_time_cond
     model = LightningDiT(
         input_size=args.resolution // 8,
@@ -824,10 +850,12 @@ def main(config_path):
         use_rope=args.use_rope,
         use_rmsnorm=args.use_rmsnorm,
         wo_shift=args.wo_shift,
-        num_fused_layers=len(args.layer_dinov2b_list), 
+        num_fused_layers=len(args.layer_dinov2b_list),
         use_checkpoint=getattr(args, "use_checkpoint", False),
         use_lq_token_modulation=getattr(args, "use_lq_token_modulation", False),
         lq_mod_downscale_factor=getattr(args, "lq_mod_downscale_factor", 8),
+        ocr_cond_dim=(args.ocr_cond_dim if getattr(args, "use_ocr_cond", False) else None),
+        ocr_cond_gate_init=float(getattr(args, "ocr_cond_gate_init", 0.0)),
     )
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -1269,6 +1297,17 @@ def main(config_path):
                     z[-1] = x_norm
                     z = [z[i] for i in args.layer_dinov2b_list]
 
+                    if ocr_cond_encoder is not None:
+                        z.append(
+                            extract_ocr_repa_tokens(
+                                ocr_cond_processor,
+                                ocr_cond_encoder,
+                                lq,
+                                accelerator.device,
+                                weight_dtype,
+                            )
+                        )
+
                     repa_target = None
                     if repa_projector is not None:
                         if args.repa_type == "dino":
@@ -1408,7 +1447,7 @@ def main(config_path):
 
                     if ctc_active:
                         ocr_ctc_loss, ocr_ctc_logs = ocr_repa_system.compute_ctc_loss(
-                            pred_image_m11, hq_image_m11
+                            pred_image_m11, hq_image_m11, boxes_per_image=gt_boxes
                         )
                         loss = loss + args.ocr_ctc_weight * ocr_ctc_loss
                         loss_backward = loss
@@ -1530,6 +1569,17 @@ def main(config_path):
                                     z = [v for k, v in features.items() if k.startswith('layer_')]
                                     z[-1] = x_norm
                                     z = [z[i] for i in args.layer_dinov2b_list]
+                                    if ocr_cond_encoder is not None:
+                                        with torch.no_grad():
+                                            z.append(
+                                                extract_ocr_repa_tokens(
+                                                    ocr_cond_processor,
+                                                    ocr_cond_encoder,
+                                                    lq,
+                                                    accelerator.device,
+                                                    weight_dtype,
+                                                )
+                                            )
 
 
                                 if args.ae_type == 'qwen':
@@ -1596,6 +1646,8 @@ def main(config_path):
                 if ocr_ctc_loss is not None:
                     logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
                     logs.update(ocr_ctc_logs)
+                if ocr_cond_encoder is not None:
+                    logs["ocr_cond_gate"] = float(accelerator.unwrap_model(model).ocr_cond_gate.detach())
                 progress_bar.set_postfix(**logs)
                 
             log_loss_steps = getattr(args, "log_loss_steps", 250)
@@ -1616,6 +1668,8 @@ def main(config_path):
                 if ocr_ctc_loss is not None:
                     logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
                     logs.update(ocr_ctc_logs)
+                if ocr_cond_encoder is not None:
+                    logs["ocr_cond_gate"] = float(accelerator.unwrap_model(model).ocr_cond_gate.detach())
                 accelerator.log(logs, step=global_step)
 
     gc.enable()

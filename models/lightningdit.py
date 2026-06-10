@@ -356,6 +356,8 @@ class LightningDiT(nn.Module):
         auxiliary_time_cond=False,
         use_lq_token_modulation=False,
         lq_mod_downscale_factor=8,
+        ocr_cond_dim=None,
+        ocr_cond_gate_init=0.0,
     ):
         super().__init__()
         self.learn_sigma = learn_sigma
@@ -427,6 +429,25 @@ class LightningDiT(nn.Module):
                 drop=0
             )
             
+        # OCR semantic condition stream: tokens from a frozen text-recognition
+        # encoder are projected separately and concatenated with the DINO tokens
+        # along the token dim for cross-attention. With gate=0 the extra tokens
+        # carry no information (they collapse to the shared K/V bias vector,
+        # adding only a tiny constant perturbation), so distillation starts
+        # functionally equivalent to a checkpoint trained without the stream.
+        self.ocr_cond_dim = ocr_cond_dim
+        if self.ocr_cond_dim is not None:
+            approx_gelu_ocr = lambda: nn.GELU(approximate="tanh")
+            self.layer_norm_ocr = nn.LayerNorm(self.ocr_cond_dim)
+            self.mlp_ca_ocr = Mlp(
+                in_features=self.ocr_cond_dim,
+                hidden_features=hidden_size * encdim_ratio,
+                out_features=hidden_size,
+                act_layer=approx_gelu_ocr,
+                drop=0
+            )
+            self.ocr_cond_gate = nn.Parameter(torch.full((1,), float(ocr_cond_gate_init)))
+
         self.auxiliary_time_cond = auxiliary_time_cond
         if auxiliary_time_cond:
             self.r_embedder = TimestepEmbedder(hidden_size)
@@ -498,6 +519,17 @@ class LightningDiT(nn.Module):
             block.attn.fused_attn = False
             block.cross_attn.fused_attn = False
 
+    def _project_cond_tokens(self, z):
+        """Project the conditioning streams for cross-attention. z is a list:
+        z[0] = vision-encoder (DINO) tokens; optional z[1] = OCR-encoder tokens,
+        present only when ocr_cond_dim is configured. Models built without the
+        OCR stream simply ignore the extra entry."""
+        tokens = self.mlp_ca(self.layer_norm(z[0]))
+        if self.ocr_cond_dim is not None and len(z) > 1 and z[1] is not None:
+            ocr_tokens = self.mlp_ca_ocr(self.layer_norm_ocr(z[1]))
+            tokens = torch.cat([tokens, self.ocr_cond_gate * ocr_tokens], dim=1)
+        return tokens
+
     def forward(self, x, t, r=None, z=None, return_hidden_at=None, lq_mod=None):
         """
         Forward pass of LightningDiT.
@@ -518,9 +550,7 @@ class LightningDiT(nn.Module):
         c0 = self.t_block(c)
 
         if self.z_dims is not None:
-            z = z[0]
-            z = self.layer_norm(z)  
-            z = self.mlp_ca(z)  
+            z = self._project_cond_tokens(z)
 
         hidden = None
         for block_idx, block in enumerate(self.blocks):
@@ -600,9 +630,7 @@ class LightningDiT(nn.Module):
         c0 = self.t_block(c)
 
         if self.z_dims is not None and z is not None:
-            z = z[0]
-            z = self.layer_norm(z)  
-            z = self.mlp_ca(z)
+            z = self._project_cond_tokens(z)
 
         if self.use_rope:
             train_hw_seq_len = self.x_embedder.img_size[0] // self.patch_size

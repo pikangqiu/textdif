@@ -45,6 +45,15 @@ case "${EXP}" in
   ocr_ctc)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_ctc.yml"
     ;;
+  ocr_ctc_gt)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_ctc_gt.yml"
+    ;;
+  ocr_cond)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_cond.yml"
+    ;;
+  ocr_cond_local_gt)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_cond_local_gt.yml"
+    ;;
   seg)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_seg_repa.yml"
     ;;
