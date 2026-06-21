@@ -269,7 +269,7 @@ def _crop_venc_features(z_fea_full, hi, wi, he, we, lh, lw):
 
 def tiled_latent_inference(
     model, vae, venc, lq_tensor, args,
-    device='cuda', light_decoder=None,
+    device='cuda', light_decoder=None, vosr_model=None,
 ):
     """
     Latent-space tiled inference for VOSR DiT.
@@ -300,6 +300,8 @@ def tiled_latent_inference(
     lt_size = max((args.tile_size // AE_FACTOR // patch_size) * patch_size, patch_size)
     lt_overlap = max(args.tile_overlap // AE_FACTOR, lt_size // 8)
     lt_size = min(lt_size, min(lh, lw))
+    # Keep the tile patchifiable when an image side is smaller than the tile.
+    lt_size = max((lt_size // patch_size) * patch_size, patch_size)
     lt_overlap = min(lt_overlap, lt_size - 1)
 
     # --- Fast path: no tiling needed ---
@@ -308,7 +310,8 @@ def tiled_latent_inference(
         with torch.no_grad():
             z_fea = get_venc_features(venc, lq_tensor, args) if venc is not None else None
             z = torch.randn_like(lq_latent)
-            lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
+            if vosr_model is not None:
+                lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
             n_steps = args.infer_steps
             t_seq = torch.linspace(1., 0., n_steps + 1, device=device)
             for i in range(n_steps):
@@ -318,7 +321,8 @@ def tiled_latent_inference(
                 z = z - (t_cur - t_nxt) * u
             return _decode_latent(vae, z, args, latents_mean, latents_std, light_decoder)
 
-    lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
+    if vosr_model is not None:
+        lq_latent = vosr_model._apply_ragp_to_lq_for_sampling(lq_latent, ragp_weight)
 
     # --- Build tile grid & Gaussian weights ---
     h_pos = _make_tile_grid(lh, lt_size, lt_overlap)
@@ -573,7 +577,7 @@ def main():
             if args.tile_size > 0:
                 sr_tensor = tiled_latent_inference(
                     model, vae, venc, lq, args,
-                    device=device, light_decoder=light_decoder,
+                    device=device, light_decoder=light_decoder, vosr_model=vosr_model,
                 )
             else:
                 with torch.no_grad():

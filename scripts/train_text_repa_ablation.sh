@@ -60,8 +60,14 @@ case "${EXP}" in
   seg_token)
     CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_seg_token_repa.yml"
     ;;
+  detmap)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_detmap.yml"
+    ;;
+  realctc)
+    CONFIG="${CONFIG_ROOT}/VOSR_0.5B_text_guided_target_no_rc_ocr_realctc.yml"
+    ;;
   *)
-    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_local_gt, ocr_ctc, seg, or seg_token." >&2
+    echo "Unknown REPA experiment: ${EXP}. Expected: dino, dino_token, ocr, ocr_local, ocr_local_gt, ocr_ctc, seg, seg_token, detmap, or realctc." >&2
     exit 2
     ;;
 esac

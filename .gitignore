@@ -34,3 +34,6 @@ index.html*
 *.gz
 *.zip
 *.npz
+
+# local-only server credentials
+doc/SERVERS.private.md

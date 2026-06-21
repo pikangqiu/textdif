@@ -7,7 +7,7 @@ from tqdm import tqdm
 from models.lightningdit import LightningDiT
 from models.repa_align import RepaProjector, repa_cosine_loss
 from models.fd_loss import build_fd_loss_system
-from models.ocr_repa import build_ocr_repa_system, ocr_repa_enabled, ocr_ctc_enabled
+from models.ocr_repa import build_ocr_repa_system, ocr_repa_enabled, ocr_ctc_enabled, ocr_detmap_enabled, ocr_real_ctc_enabled
 from models.codsr_guidance import ChannelwiseSobel, build_ragp_weight
 from models.vae_encoder_lora import (
     configure_vae_encoder_lora,
@@ -558,13 +558,15 @@ def update_ema(ema_model, model, decay=0.9999):
 
 
 def load_dinov2(args, device):
-    if args.enc_type == 'dinov2b':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
-    elif args.enc_type == 'dinov2l':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14')
-    elif args.enc_type == 'dinov2g':
-        encoder = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14')
-        # encoder.load_state_dict(checkpoint, strict=False)
+    # Prefer the locally cached hub repo (preset/ckpts/torch_cache, set above) so
+    # offline boxes (e.g. node199) don't fail on torch.hub's github ref probe.
+    _dinov2_entry = {'dinov2b': 'dinov2_vitb14', 'dinov2l': 'dinov2_vitl14',
+                     'dinov2g': 'dinov2_vitg14'}[args.enc_type]
+    _local_repo = os.path.join(torch.hub.get_dir(), 'facebookresearch_dinov2_main')
+    if os.path.isdir(_local_repo):
+        encoder = torch.hub.load(_local_repo, _dinov2_entry, source='local')
+    else:
+        encoder = torch.hub.load('facebookresearch/dinov2', _dinov2_entry)
 
     del encoder.head
 
@@ -942,7 +944,7 @@ def main(config_path):
             )
 
     ocr_repa_system = None
-    if ocr_repa_enabled(args) or ocr_ctc_enabled(args):
+    if ocr_repa_enabled(args) or ocr_ctc_enabled(args) or ocr_detmap_enabled(args) or ocr_real_ctc_enabled(args):
         # 2a: local-crop OCR-REPA
         args.ocr_repa_weight = float(getattr(args, "ocr_repa_weight", 0.0))
         args.ocr_repa_interval = max(1, int(getattr(args, "ocr_repa_interval", 1)))
@@ -953,6 +955,16 @@ def main(config_path):
         args.ocr_ctc_interval = max(1, int(getattr(args, "ocr_ctc_interval", args.ocr_repa_interval)))
         args.ocr_ctc_start_step = int(getattr(args, "ocr_ctc_start_step", 0))
         args.ocr_ctc_on_sync_only = bool(getattr(args, "ocr_ctc_on_sync_only", False))
+        # 2c: text detection-response-map consistency (defaults off; independent gate)
+        args.ocr_detmap_weight = float(getattr(args, "ocr_detmap_weight", 0.0))
+        args.ocr_detmap_interval = max(1, int(getattr(args, "ocr_detmap_interval", args.ocr_repa_interval)))
+        args.ocr_detmap_start_step = int(getattr(args, "ocr_detmap_start_step", 0))
+        args.ocr_detmap_on_sync_only = bool(getattr(args, "ocr_detmap_on_sync_only", False))
+        # 2d: real GT-text CTC (defaults off; independent gate). Needs GT boxes+texts.
+        args.ocr_real_ctc_weight = float(getattr(args, "ocr_real_ctc_weight", 0.0))
+        args.ocr_real_ctc_interval = max(1, int(getattr(args, "ocr_real_ctc_interval", args.ocr_repa_interval)))
+        args.ocr_real_ctc_start_step = int(getattr(args, "ocr_real_ctc_start_step", 0))
+        args.ocr_real_ctc_on_sync_only = bool(getattr(args, "ocr_real_ctc_on_sync_only", False))
         ocr_repa_system = build_ocr_repa_system(args, device=accelerator.device)
         ocr_repa_system.eval()
         requires_grad(ocr_repa_system, False)
@@ -962,6 +974,11 @@ def main(config_path):
                 f"(interval={args.ocr_repa_interval}, start={args.ocr_repa_start_step}), "
                 f"ctc_weight={args.ocr_ctc_weight} "
                 f"(interval={args.ocr_ctc_interval}, start={args.ocr_ctc_start_step}), "
+                f"detmap_weight={args.ocr_detmap_weight} "
+                f"(interval={args.ocr_detmap_interval}, start={args.ocr_detmap_start_step}, "
+                f"loss={ocr_repa_system.config.detmap_loss_type}), "
+                f"real_ctc_weight={args.ocr_real_ctc_weight} "
+                f"(interval={args.ocr_real_ctc_interval}, start={args.ocr_real_ctc_start_step}), "
                 f"loss_type={ocr_repa_system.config.loss_type}, max_boxes={ocr_repa_system.config.max_boxes}"
             )
 
@@ -1281,6 +1298,7 @@ def main(config_path):
 
             hq = batch["hq"].to(accelerator.device, non_blocking=True)
             gt_boxes = batch.get("gt_boxes") if isinstance(batch, dict) else None
+            gt_texts = batch.get("gt_texts") if isinstance(batch, dict) else None
             with torch.no_grad():
                 _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
@@ -1374,7 +1392,21 @@ def main(config_path):
                         and global_step % args.ocr_ctc_interval == 0
                         and (not args.ocr_ctc_on_sync_only or accelerator.sync_gradients)
                     )
-                    need_aux = repa_projector is not None or fd_active or ocr_active or ctc_active
+                    detmap_active = (
+                        ocr_repa_system is not None
+                        and args.ocr_detmap_weight > 0
+                        and global_step >= args.ocr_detmap_start_step
+                        and global_step % args.ocr_detmap_interval == 0
+                        and (not args.ocr_detmap_on_sync_only or accelerator.sync_gradients)
+                    )
+                    real_ctc_active = (
+                        ocr_repa_system is not None
+                        and args.ocr_real_ctc_weight > 0
+                        and global_step >= args.ocr_real_ctc_start_step
+                        and global_step % args.ocr_real_ctc_interval == 0
+                        and (not args.ocr_real_ctc_on_sync_only or accelerator.sync_gradients)
+                    )
+                    need_aux = repa_projector is not None or fd_active or ocr_active or ctc_active or detmap_active or real_ctc_active
                     if args.distill_type == 'shortcut':
                         loss_out = vosr.loss_fm_distill_shortcut_improved(
                             model,
@@ -1407,6 +1439,10 @@ def main(config_path):
                     ocr_repa_logs = {}
                     ocr_ctc_loss = None
                     ocr_ctc_logs = {}
+                    ocr_detmap_loss = None
+                    ocr_detmap_logs = {}
+                    ocr_real_ctc_loss = None
+                    ocr_real_ctc_logs = {}
                     pred_image_m11 = None
                     if need_aux:
                         loss, loss_backward, aux = loss_out
@@ -1424,7 +1460,7 @@ def main(config_path):
                         loss = loss + args.repa_weight * repa_loss
                         loss_backward = loss
 
-                    if fd_active or ocr_active or ctc_active:
+                    if fd_active or ocr_active or ctc_active or detmap_active or real_ctc_active:
                         pred_image_m11 = decode_x0_from_distill_aux(
                             aux,
                             unwrapped_model_ae,
@@ -1450,6 +1486,20 @@ def main(config_path):
                             pred_image_m11, hq_image_m11, boxes_per_image=gt_boxes
                         )
                         loss = loss + args.ocr_ctc_weight * ocr_ctc_loss
+                        loss_backward = loss
+
+                    if detmap_active:
+                        ocr_detmap_loss, ocr_detmap_logs = ocr_repa_system.compute_detmap_loss(
+                            pred_image_m11, hq_image_m11
+                        )
+                        loss = loss + args.ocr_detmap_weight * ocr_detmap_loss
+                        loss_backward = loss
+
+                    if real_ctc_active:
+                        ocr_real_ctc_loss, ocr_real_ctc_logs = ocr_repa_system.compute_real_ctc_loss(
+                            pred_image_m11, hq_image_m11, gt_boxes, gt_texts
+                        )
+                        loss = loss + args.ocr_real_ctc_weight * ocr_real_ctc_loss
                         loss_backward = loss
 
                     if not need_aux:
@@ -1646,6 +1696,12 @@ def main(config_path):
                 if ocr_ctc_loss is not None:
                     logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
                     logs.update(ocr_ctc_logs)
+                if ocr_detmap_loss is not None:
+                    logs["ocr_detmap_loss"] = ocr_detmap_loss.detach().item()
+                    logs.update(ocr_detmap_logs)
+                if ocr_real_ctc_loss is not None:
+                    logs["ocr_real_ctc_loss"] = ocr_real_ctc_loss.detach().item()
+                    logs.update(ocr_real_ctc_logs)
                 if ocr_cond_encoder is not None:
                     logs["ocr_cond_gate"] = float(accelerator.unwrap_model(model).ocr_cond_gate.detach())
                 progress_bar.set_postfix(**logs)
@@ -1668,6 +1724,12 @@ def main(config_path):
                 if ocr_ctc_loss is not None:
                     logs["ocr_ctc_loss"] = ocr_ctc_loss.detach().item()
                     logs.update(ocr_ctc_logs)
+                if ocr_detmap_loss is not None:
+                    logs["ocr_detmap_loss"] = ocr_detmap_loss.detach().item()
+                    logs.update(ocr_detmap_logs)
+                if ocr_real_ctc_loss is not None:
+                    logs["ocr_real_ctc_loss"] = ocr_real_ctc_loss.detach().item()
+                    logs.update(ocr_real_ctc_logs)
                 if ocr_cond_encoder is not None:
                     logs["ocr_cond_gate"] = float(accelerator.unwrap_model(model).ocr_cond_gate.detach())
                 accelerator.log(logs, step=global_step)

@@ -80,6 +80,10 @@ class OCRRepaConfig:
     feat_key: str = "neck_out"
     loss_type: str = "cosine"  # "cosine" | "mse"
     bgr_input: bool = True
+    # 2c: text detection-response-map consistency. detmap_size=0 keeps the native
+    # resolution (must be a multiple of 32); detmap_loss_type in {"l1","mse","bce"}.
+    detmap_size: int = 0
+    detmap_loss_type: str = "l1"
     # Skip building the text detector (and its shapely/pyclipper DB-postprocess
     # import) when boxes are always supplied externally, e.g. GT-box mode.
     build_detector: bool = True
@@ -154,6 +158,12 @@ class OCRRepaSystem(nn.Module):
                 p.requires_grad_(False)
 
         self._rec_dtype = next(self.rec_net.parameters()).dtype
+        if self.detector is not None:
+            self._det_dtype = next(self.detector.net.parameters()).dtype
+            # ImageNet mean/std exactly as PaddleOCR's DB NormalizeImage (applied to
+            # the cv2/BGR channel order; we flip RGB->BGR below to match).
+            self._det_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+            self._det_std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
         # CTC blank is index 0 in PaddleOCR recognizers (see CTCLabelDecode).
         self.ctc_loss = nn.CTCLoss(blank=0, zero_infinity=True)
 
@@ -310,6 +320,59 @@ class OCRRepaSystem(nn.Module):
         }
         return loss, logs
 
+    # ---- detection-map consistency (2c) ---------------------------------
+    def _detector_probmap(self, image_m11):
+        """Differentiable DB probability map for an image in [-1, 1] (RGB).
+
+        Mirrors PaddleOCR's DB preprocessing (scale 1/255, ImageNet mean/std on
+        BGR channel order) but in pure torch so gradients reach ``image_m11``.
+        Returns the sigmoid shrink map (B, 1, h, w)."""
+        if self.detector is None:
+            raise RuntimeError("OCR detector was not built; cannot compute detmap loss.")
+        x01 = (image_m11.float() * 0.5 + 0.5).clamp(0.0, 1.0)
+        size = int(self.config.detmap_size)
+        if size > 0 and x01.shape[-1] != size:
+            x01 = F.interpolate(x01, size=(size, size), mode="bilinear", align_corners=False)
+        if self.config.bgr_input:
+            x01 = x01[:, [2, 1, 0], :, :]  # RGB -> BGR to match PaddleOCR det input
+        x = (x01 - self._det_mean) / self._det_std
+        # Run the frozen DB net in full precision (outside the trainer's bf16
+        # autocast). This both avoids bf16 numerics and keeps the autocast cache
+        # from perturbing the gradient-checkpointed DiT recomputation.
+        with _no_autocast():
+            out = self.detector.net(x.to(self._det_dtype))
+        maps = out["maps"] if isinstance(out, dict) else out
+        # DBHead(eval) returns the single shrink map; be robust to a 3-ch train head.
+        return maps[:, :1, :, :].float()
+
+    def compute_detmap_loss(self, pred_image_m11, hr_image_m11):
+        """2c: align the student's text detection response map to the HR one.
+
+        Returns (loss, logs). The detector is frozen; gradients flow only through
+        ``pred_image_m11``. The HR map is detached (target)."""
+        if pred_image_m11.shape[-2:] != hr_image_m11.shape[-2:]:
+            pred_image_m11 = F.interpolate(
+                pred_image_m11.float(), size=hr_image_m11.shape[-2:],
+                mode="bilinear", align_corners=False,
+            )
+        pred_map = self._detector_probmap(pred_image_m11)
+        with torch.no_grad():
+            hr_map = self._detector_probmap(hr_image_m11.detach()).detach()
+
+        lt = self.config.detmap_loss_type
+        if lt == "mse":
+            loss = F.mse_loss(pred_map, hr_map)
+        elif lt == "bce":
+            loss = F.binary_cross_entropy(pred_map.clamp(1e-6, 1 - 1e-6), hr_map)
+        else:  # "l1"
+            loss = F.l1_loss(pred_map, hr_map)
+
+        logs = {
+            "ocr_detmap/loss": float(loss.detach()),
+            "ocr_detmap/hr_text_frac": float((hr_map > 0.3).float().mean().detach()),
+        }
+        return loss, logs
+
     # ---- CTC recognition loss (2b) --------------------------------------
     def _rec_logits(self, crops_m11):
         """Raw CTC logits (N, T, num_classes); the head softmax is bypassed."""
@@ -392,6 +455,115 @@ class OCRRepaSystem(nn.Module):
         }
         return loss, logs
 
+    # ---- real GT-text CTC loss (2d) --------------------------------------
+    def _encode_text(self, text):
+        """Map a GT transcript string to recognizer class indices (CTC, blank=0).
+        Out-of-vocabulary characters are dropped; case is preserved (the ppocr
+        server dict has both cases). Falls back to lowercase for OOV letters."""
+        d = self.recognizer.postprocess_op.dict
+        out = []
+        for ch in str(text):
+            if ch in d:
+                out.append(d[ch])
+            elif ch.lower() in d:
+                out.append(d[ch.lower()])
+        return out
+
+    def _prepare_given_boxes_texts(self, boxes_per_image, texts_per_image, h, w):
+        """Like _prepare_given_boxes but carries the per-box GT transcript through
+        the same clip/size-filter/area-sort/cap, so boxes and texts stay aligned."""
+        out_boxes, out_texts = [], []
+        for img_i, boxes in enumerate(boxes_per_image):
+            texts = texts_per_image[img_i] if texts_per_image is not None else None
+            cand, cand_txt, areas = [], [], []
+            for box_i, box in enumerate(boxes or []):
+                x1, y1, x2, y2 = (int(v) for v in box)
+                x1 = max(0, min(x1, w - 1))
+                y1 = max(0, min(y1, h - 1))
+                x2 = max(x1 + 1, min(x2, w))
+                y2 = max(y1 + 1, min(y2, h))
+                if (x2 - x1) < self.config.min_box_size or (y2 - y1) < self.config.min_box_size:
+                    continue
+                txt = texts[box_i] if (texts is not None and box_i < len(texts)) else ""
+                cand.append([x1, y1, x2, y2])
+                cand_txt.append(txt)
+                areas.append((x2 - x1) * (y2 - y1))
+            if cand:
+                order = np.argsort(areas)[::-1][: self.config.max_boxes]
+                out_boxes.append([cand[i] for i in order])
+                out_texts.append([cand_txt[i] for i in order])
+            else:
+                out_boxes.append([])
+                out_texts.append([])
+        return out_boxes, out_texts
+
+    def compute_real_ctc_loss(self, pred_image_m11, hr_image_m11, boxes_per_image, texts_per_image):
+        """CTC loss of the prediction against the *real* GT transcripts (experiment
+        2d). Unlike 2b, no HR forward / greedy pseudo-label: targets come straight
+        from the annotation text via the recognizer's own char dict. Gradients flow
+        only through the prediction crops. Returns (loss, logs)."""
+        if pred_image_m11.shape[-2:] != hr_image_m11.shape[-2:]:
+            pred_image_m11 = F.interpolate(
+                pred_image_m11.float(),
+                size=hr_image_m11.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        zero_logs = {"ocr_realctc/loss": 0.0, "ocr_realctc/n_boxes": 0.0, "ocr_realctc/n_used": 0.0}
+        if boxes_per_image is None:
+            return pred_image_m11.sum() * 0.0, zero_logs
+        h, w = hr_image_m11.shape[-2:]
+        boxes_per_image, texts_per_image = self._prepare_given_boxes_texts(
+            boxes_per_image, texts_per_image, h, w
+        )
+        n_boxes = sum(len(b) for b in boxes_per_image)
+        if n_boxes == 0:
+            return pred_image_m11.sum() * 0.0, zero_logs
+
+        # Encode every box's transcript; keep only boxes with >=1 in-vocab char.
+        # kept_per_image preserves image grouping for _crop_and_stack, which
+        # flattens image-major/box-order -- the same order as `targets`.
+        kept_per_image, targets = [], []
+        for boxes, texts in zip(boxes_per_image, texts_per_image):
+            img_boxes = []
+            for box, txt in zip(boxes, texts):
+                idx = self._encode_text(txt)
+                if idx:
+                    img_boxes.append(box)
+                    targets.append(idx)
+            kept_per_image.append(img_boxes)
+        if not targets:
+            return pred_image_m11.sum() * 0.0, zero_logs
+
+        # A single sample with many/large boxes (or transient memory pressure from
+        # co-tenant jobs) can spike the recognizer forward past the GPU budget. Skip
+        # that microstep's CTC rather than killing a multi-hour run; gradients for the
+        # rest of the loss are unaffected because this branch only adds to `loss`.
+        try:
+            pred_crops = self._crop_and_stack(pred_image_m11, kept_per_image)
+            pred_logits = self._rec_logits(pred_crops)  # (N, T, K), N == len(flat_boxes)
+            log_probs = F.log_softmax(pred_logits.float(), dim=-1).transpose(0, 1)  # (T, N, K)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print(f"[ocr_realctc] OOM on {n_boxes} boxes -> skipping this microstep", flush=True)
+            return pred_image_m11.sum() * 0.0, zero_logs
+
+        timesteps, n_used = log_probs.shape[0], log_probs.shape[1]
+        device = log_probs.device
+        target_lengths = [len(t) for t in targets]
+        flat_targets = torch.tensor([i for t in targets for i in t], dtype=torch.long, device=device)
+        tgt_lengths = torch.tensor(target_lengths, dtype=torch.long, device=device)
+        tgt_lengths = torch.clamp(tgt_lengths, max=timesteps)
+        in_lengths = torch.full((n_used,), timesteps, dtype=torch.long, device=device)
+
+        loss = self.ctc_loss(log_probs, flat_targets, in_lengths, tgt_lengths)
+        logs = {
+            "ocr_realctc/loss": float(loss.detach()),
+            "ocr_realctc/n_boxes": float(n_boxes),
+            "ocr_realctc/n_used": float(n_used),
+        }
+        return loss, logs
+
 
 def ocr_repa_enabled(args) -> bool:
     return float(getattr(args, "ocr_repa_weight", 0.0)) > 0.0
@@ -399,6 +571,14 @@ def ocr_repa_enabled(args) -> bool:
 
 def ocr_ctc_enabled(args) -> bool:
     return float(getattr(args, "ocr_ctc_weight", 0.0)) > 0.0
+
+
+def ocr_detmap_enabled(args) -> bool:
+    return float(getattr(args, "ocr_detmap_weight", 0.0)) > 0.0
+
+
+def ocr_real_ctc_enabled(args) -> bool:
+    return float(getattr(args, "ocr_real_ctc_weight", 0.0)) > 0.0
 
 
 def build_ocr_repa_system(args, device) -> OCRRepaSystem:
@@ -424,10 +604,14 @@ def build_ocr_repa_system(args, device) -> OCRRepaSystem:
         feat_key=str(getattr(args, "ocr_repa_feat_key", "neck_out")),
         loss_type=str(getattr(args, "ocr_repa_loss_type", "cosine")),
         bgr_input=bool(getattr(args, "ocr_repa_bgr_input", True)),
+        detmap_size=int(getattr(args, "ocr_detmap_size", 0)),
+        detmap_loss_type=str(getattr(args, "ocr_detmap_loss_type", "l1")),
         # GT-box mode supplies boxes from the dataset, so the detector (and its
         # shapely/pyclipper deps) is not needed. Allow an explicit override too.
+        # 2c (detmap consistency) always needs the detector regardless of GT-box mode.
         build_detector=bool(
-            getattr(args, "ocr_build_detector", not getattr(args, "ocr_use_gt_boxes", False))
+            ocr_detmap_enabled(args)
+            or getattr(args, "ocr_build_detector", not getattr(args, "ocr_use_gt_boxes", False))
         ),
     )
     return OCRRepaSystem(config, device=device)

@@ -7,7 +7,7 @@ metadata:
   originSessionId: 67f8b725-e174-45ba-8598-3306eae189c2
 ---
 
-第二台训练服务器 **172.31.233.199(node199)**,用户 `yawen` / 密码 `yawen123456`,仓库在 `/data2/wyw/ywk/VOSR_textsr`(与不可动的 `/data2/wyw/ywk/VOSR` 是同级目录),数据在 `/data2/wyw/ywk/datastes/SA/`。Conda 激活:`source /data/anaconda/bin/activate && conda activate vosr`(**不要修改这个环境**)。
+第二台训练服务器 **172.31.233.199(node199)**,用户 `yawen` / 密码 `<见 doc/SERVERS.private.md>`,仓库在 `/data2/wyw/ywk/VOSR_textsr`(与不可动的 `/data2/wyw/ywk/VOSR` 是同级目录),数据在 `/data2/wyw/ywk/datastes/SA/`。Conda 激活:`source /data/anaconda/bin/activate && conda activate vosr`(**不要修改这个环境**)。
 
 **GPU 拓扑(`nvidia-smi topo -m`)**:5×80GB GPU,跨 2 个 NUMA 节点。
 - NUMA0:GPU0、GPU1(互联 NODE)。GPU0 通常被别人占着。

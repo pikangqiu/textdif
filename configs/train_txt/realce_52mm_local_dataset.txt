@@ -1,0 +1,1 @@
+configs/train_txt/realce_52mm_images_local.txt, 1

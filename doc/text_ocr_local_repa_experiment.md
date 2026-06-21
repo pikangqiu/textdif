@@ -129,3 +129,5 @@ NPROC_PER_NODE=4 bash scripts/train_text_repa_ablation.sh ocr_ctc
 - 每个 DDP 进程各自构建一份冻结 OCR 系统;det 用 numpy 逐图运行,batch 大时按 `ocr_repa_max_boxes` 截断防 OOM。
 - 当前用 CRNN(中英)recognizer;如需多语种/更强 glyph 表征可换 v4 rec(需提供对应 yaml)。
 ```
+
+

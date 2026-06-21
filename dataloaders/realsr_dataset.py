@@ -86,6 +86,8 @@ def gt_boxes_collate_fn(batch):
     out = {"hq": torch.stack([b["hq"] for b in batch], dim=0)}
     if batch and "gt_boxes" in batch[0]:
         out["gt_boxes"] = [b["gt_boxes"] for b in batch]
+    if batch and "gt_texts" in batch[0]:
+        out["gt_texts"] = [b["gt_texts"] for b in batch]
     return out
 
 
@@ -151,15 +153,18 @@ class TxtPairDataset(Dataset):
             return im.convert("RGB")
 
     def _transform_boxes(self, path, scale, crop_x, crop_y):
-        """Map original-image GT boxes into the current 512px crop. Returns a list
-        of int [x1,y1,x2,y2] kept only if they survive clipping at >= min size."""
+        """Map original-image GT boxes into the current 512px crop. Returns
+        (boxes, texts): boxes is a list of int [x1,y1,x2,y2] kept only if they
+        survive clipping at >= min size; texts is the aligned GT transcript per
+        kept box (empty string when the annotation lacks a text field)."""
         stem = os.path.splitext(os.path.basename(path))[0]
         rec = self.gt_boxes_index.get(stem)
         if not rec:
-            return []
+            return [], []
         S = self.args.resolution
-        out = []
-        for (x1, y1, x2, y2) in rec["boxes"]:
+        texts_src = rec.get("texts")
+        out, out_txt = [], []
+        for bi, (x1, y1, x2, y2) in enumerate(rec["boxes"]):
             nx1 = min(max(x1 * scale - crop_x, 0.0), S)
             ny1 = min(max(y1 * scale - crop_y, 0.0), S)
             nx2 = min(max(x2 * scale - crop_x, 0.0), S)
@@ -167,7 +172,8 @@ class TxtPairDataset(Dataset):
             ix1, iy1, ix2, iy2 = int(nx1), int(ny1), int(round(nx2)), int(round(ny2))
             if (ix2 - ix1) >= self.gt_min_box_size and (iy2 - iy1) >= self.gt_min_box_size:
                 out.append([ix1, iy1, ix2, iy2])
-        return out
+                out_txt.append(texts_src[bi] if (texts_src is not None and bi < len(texts_src)) else "")
+        return out, out_txt
 
     def __getitem__(self, idx):
         for retry in range(self.max_retry):
@@ -178,8 +184,8 @@ class TxtPairDataset(Dataset):
                 gt_img = self._load_rgb(path)
                 if self.split == 'train' and self.use_gt_boxes:
                     gt_img, scale, crop_x, crop_y = self.gt_crop(gt_img)
-                    boxes = self._transform_boxes(path, scale, crop_x, crop_y)
-                    return {"hq": self.to_tensor(gt_img), "gt_boxes": boxes}
+                    boxes, texts = self._transform_boxes(path, scale, crop_x, crop_y)
+                    return {"hq": self.to_tensor(gt_img), "gt_boxes": boxes, "gt_texts": texts}
                 if self.split == 'train':
                     gt_img = self.random_crop_preproc(gt_img)
                 elif self.split == 'test':
