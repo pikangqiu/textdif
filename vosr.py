@@ -186,9 +186,12 @@ class VOSR(nn.Module):
                 v_weak_pred = model_tea(inp_weak, t=t, z=z_weak, lq_mod=lq_mod_weak)
                 v = v_weak_pred + omega * (v_cond - v_weak_pred)
             else:
-                v_cond = v_target
-                v_weak_pred = model(inp_weak, t=t, r=t, z=z_weak, lq_mod=lq_mod_weak)
-                v = v_weak_pred + omega * (v_cond - v_weak_pred)
+                # Paper-style supervised finetune (no teacher): regress directly to the
+                # GT velocity. The previous CFG blend required an extra trainable
+                # model(inp_weak) forward, which advanced CUDA RNG and broke gradient-
+                # checkpoint recompute (saved-vs-recomputed metadata mismatch). Pure
+                # supervision needs neither the weak prediction nor the CFG mix.
+                v = v_target
         return v
 
     # ──────────────────── Training losses ──────────────────── #

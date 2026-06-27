@@ -1,0 +1,1201 @@
+Restore Text First, Enhance Image Later: Two-Stage Scene Text Image
+Super-Resolution with Glyph Structure Guidance
+Minxing Luo1,2,∗, Linlong Fan2,∗, Wang Qiushi2,3, Ge Wu1, Yiyan Luo2, Yuhang Yu2,
+Jinwei Chen2, Yaxing Wang1, Qingnan Fan2,† and Jian Yang1,†
+1VCIP, CS, Nankai University 2vivo Mobile Communication Co. Ltd 3SDS, The Chinese University of Hong Kong, Shenzhen
+(a) Real World Samples
+(b) Comparison with other methods
+Low Quality Input HAT DiffBIR
+TIGER (Ours)TADiSRTSD-SR
+HAT+DiffTSR
+DiT4SR
+Input TIGER (Ours)
+TIGER (Ours)InputTIGER (Ours)Input
+TIGER (Ours)Input
+TIGER (Ours)Input
+TIGERInput
+Figure 1. We presentTIGER(Text–ImageGuided supEr-Resolution), a novel framework for scene text super-resolution. Its ‘text-first,
+image-later’ paradigm ensures accurate glyph restoration and consistently high overall image fidelity and visual quality.
+Abstract
+Current image super-resolution methods show strong
+performance on natural images but distort text, creating
+a fundamental trade-off between image quality and tex-
+tual readability. To address this, we introduceTIGER
+(Text–ImageGuided supEr-Resolution), a novel two-stage
+framework that breaks this trade-off through a “text-first,
+image-later” paradigm. TIGER explicitly decouples glyph
+restoration from image enhancement: it first reconstructs
+precise text structures and uses them to guide full-image
+super-resolution. This ensures high fidelity and readabil-
+ity. To support comprehensive training and evaluation, we
+present the UZ-ST (UltraZoom-Scene Text) dataset, the first
+Chinese scene text dataset with extreme zoom. Extensive
+experiments show TIGER achieves state-of-the-art perfor-
+mance, enhancing readability and image quality.
+*Equal contribution.
+†Corresponding author.
+1. Introduction
+Scene Text Image Super-Resolution is a critical prob-
+lem in computer vision for its vital role in car naviga-
+tion [24], scene understanding [8, 20], and document en-
+hancement [37]. It seeks to restore a high-quality super-
+resolution (SR) image from a degraded low-resolution (LR)
+input while preserving the text meaning. Unlike general im-
+age super-resolution for natural scenes, where plausible tex-
+ture synthesis or detail hallucination is acceptable and does
+not alter the semantic meaning of the image, visual texts
+exhibit extremely low tolerance to structural errors. This is
+especially evident in Chinese, where a minor stroke distor-
+tion or omission may entirely alter the meaning [25, 52].
+In recent years, with the rapid development of generative
+models such as diffusion [3, 9, 18, 33, 35, 36, 59], image
+super-resolution has increasingly relied on their strong gen-
+erative priors to recover missing details from low-resolution
+(LR) inputs [13, 15, 19, 27, 46, 47, 50]. Although these
+approaches can effectively restore fine-grained natural tex-
+1
+arXiv:2510.21590v2  [cs.CV]  24 Nov 2025
+Table 1. Dataset comparison. TextZoom [43] lacks Chinese,
+CTR [51] lacks multi-line text, and Real-CE [31] has mild degra-
+dation. UZ-ST covers all, enabling comprehensive evaluation.
+Content TextZoom CTR Real-CEUZ-ST (Ours)
+Chinese characters✗ ✓ ✓ ✓
+Multi-line text✗ ✗ ✓ ✓
+Real-World Degradation(>×4)✗ ✗ ✗ ✓
+tures (e.g., grass, leaves), they often distort text regions,
+turning them into gibberish as shown in Fig.1 (b). Because
+their primary goal is overall image enhancement, they tend
+to overlook text structure, resulting in a limited ability to
+preserve fine-grained glyph details. This limitation is am-
+plified for Chinese characters, due to their complex and di-
+verse glyph designs and relatively low saliency in images.
+Consequently, models tend to under-represent and collapse
+glyphs into oversimplified, averaged forms, producing over-
+lapping or distorted characters. Some researchers attempt to
+address this by processing only text regions [25, 58]. While
+these methods improve readability notably, the absence of
+global background constraints often introduces style incon-
+sistencies and block artifacts between text and background.
+Ultimately, current approaches face a persistent trade-off
+between maintaining readability and ensuring high image
+quality.Our key observation is that these goals need not
+be mutually exclusive if text and non-text are explicitly han-
+dled differently. Text structures can be reconstructed with
+dedicated mechanisms and then used to guide full-image
+restoration, ensuring coherent style without artifacts.
+Building on this insight, we introduceTIGER
+(Text–ImageGuided supEr-Resolution), a progressive
+two-stage paradigm for scene text super-resolution built on
+the principle of“restoring text structure first, enhancing
+the whole image later. ”Unlike methods that rely on a sin-
+gle generative prior, TIGER explicitly separates the treat-
+ment of text and non-text regions: a diffusion-based local
+text refiner focuses on reconstructing fine-grained stroke ge-
+ometry in text regions, ensuring glyph fidelity and struc-
+tural consistency. The recovered text structures are then
+injected as conditional guidance into the subsequent full-
+image restoration stage, steering global super-resolution to
+harmonize text and background while suppressing artifacts
+and preserving overall visual quality.
+Moreover, existing scene text super-resolution
+datasets [31, 43, 51] are limited to mild degradation
+(≤ ×4), which fails to reflect real-world long-distance
+scenarios and restricts models from learning robust low-
+to high-resolution mappings. To address the issue of data
+scarcity and enable comprehensive evaluation [31, 43], we
+introduce theUZ-ST(UltraZoom-Sence Text) benchmark
+dataset, the first scene text dataset that contains extreme
+zooming mode (×14.29), providing extra challenging
+scenarios for the field. Content differences are outlined
+in Tab. 1. It includes high-quality 5,036 LR–HR pairs
+captured at multiple focal lengths (ranging from 14mm
+to 200mm), with 49,675 text lines in total. Each pair
+comes with detailed annotations, including detection
+boxes and text transcripts, to support both training and
+evaluation. The dataset includes diverse scenarios such as
+shop signs, posters, and documents. It also covers varying
+lighting conditions, including daylight, indoor lighting, and
+nighttime, offering a challenging yet practical benchmark
+for the field. To ensure reliable alignment across extreme
+focal lengths, we adopt a coarse-to-fine cascade alignment
+strategy combined with manual filtering: coarse alignment
+is performed via global geometric transformation, and
+residual misalignments are corrected through local refine-
+ment. This process achieves accurate LR–HR alignment,
+thereby ensuring both the quality of the dataset and the
+reliability of our experiments. The main contributions are
+summarized as follows:
+1. We propose TIGER, the first two-stage scene text super-
+resolution framework with a‘text-first, image-later’
+paradigm that decouples glyph restoration from image
+enhancement, improving readability and visual quality.
+2. We introduce UZ-ST, the first scene text benchmark with
+extreme zoom (×14.29), offering aligned, richly anno-
+tated LR–HR pairs for thorough evaluation under chal-
+lenging real-world conditions.
+3. Extensive experiments on Real-CE and UZ-ST show our
+method outperforms prior state-of-the-art models, espe-
+cially in preserving text structure.
+2. Related Works
+Real-World Image Super-Resolution.Real-world im-
+age super-resolution (Real-SR) aims to reconstruct high-
+resolution (HR) images from low-resolution (LR) inputs
+degraded under uncontrolled real-world conditions. Early
+GAN-based methods, such as BSRGAN [55] and Real-
+ESRGAN [44], synthesize degradations through random
+combinations of known distortions and use adversarial
+training for restoration. While they generate natural-
+looking images, their instability and insensitivity to fine de-
+tails limit their ability to recover structural elements, espe-
+cially text. Recent work introduces diffusion models into
+Real-SR [45, 53], improving perceptual quality but still
+struggling with complex structures like scene text. Sta-
+bleSR [41] and DiffBIR [27] apply ControlNet [56] to
+condition generation on LR inputs, while PASD [48] and
+SeeSR [47] incorporate high-level semantics to enhance fi-
+delity. SUPIR [50] scales training with large image-text
+pairs and introduces degradation-robust encoders. Other
+approaches, including OSEDiff [46] and TSD-SR [14], di-
+rectly apply the diffusion process on LR images and dis-
+till models for one-step sampling. DiT-SR [6], Dream-
+Clear [1], and DiT4SR [15] adopt diffusion transform-
+2
+×T
+VAE 
+Encoder
+Unet
+OCR
+Transformer Encoder
+Mask 
+Out
+MM-DiT N/4
+MM-DiT 2
+MM-DiT 1
+MM-DiT N
+MM-DiT 2
+MM-DiT 1
+VAE 
+Encoder
+VAE
+Encoder
+… …
+Zero Conv VAE 
+Decoder
+Patching
+Linear
+Patching
+Linear
+UnPatching
+Linear
+Stage 2: Image Enhancement
+Stage 1: Text Restoration
+LR Input
+Text Mask
+LR Input Text Mask
+SR Output
+LR Input Text Mask
+Stage 1: 
+Text Restoration
+Stage 2: Image 
+Enhancement
+SR Output
+Overall Structure of TIGER
+Predicted
+Text
+CA CA
+𝑧𝐿
+×1
+𝑧𝑇
+C CAConcat Cross Attention
+RGB 
+Out
+VAE
+Decoder
+VAE
+Decoder
+C
+Figure 2. The framework of TIGER, which includes the Text Restoration stage (stage 1) and the Image Enhancement stage (stage 2). Stage
+1 recover accurate glyph structures from text regions. Stage 2 uses them to guide full-image restoration for coherent text and background.
+ers (DiT) for Real-SR. Despite enhancing perceptual fi-
+delity, these methods often overlook accurate text struc-
+tures. TADiSR [19] addresses Chinese scene text super-
+resolution by using Kolors as the base model and aggre-
+gating cross-attention maps for text structure supervision.
+However, constrained by the resolution of cross-attention,
+it struggles to restore small or severely degraded text.
+Text Image Super-Resolution.Text image super-
+resolution (Text-SR) restores textual content from cropped
+images of isolated words or text lines. Early methods [12]
+apply general SR architectures such as SRCNN [11] to
+enhance OCR performance. TextSR [42] introduces GANs
+with a recognition loss, while PlugNet [32] and STT [4]
+jointly train SR and recognition modules for more discrim-
+inative features. TSRN [43] releases the TextZoom dataset
+and employs an edge-aware module to preserve text details,
+while TATT [30] uses global attention for irregular layouts.
+Methods like MTDM [40] inpaint text but fail on complex
+scripts due to primitive architectures. MARCONet [25]
+employs StyleGAN priors and a glyph structure codebook
+for realistic text reconstruction. DiffTSR [58] employs
+latent diffusion to separately denoise text and text-image
+components. Despite progress in text structure restoration,
+existing methods lack global background constraints,
+causing style inconsistencies and block artifacts between
+text and background.
+3. Methodology
+3.1. Architecture Overview
+Current image super-resolution methods focus on enhanc-
+ing overall image quality but often fail to accurately pre-
+serve glyph structures, leading to distorted text in super-
+resolved images, as shown in Fig. 1 (b). Conversely, text
+image super-resolution methods improve text readability
+but do not retain the global semantic information of the
+background, causing incoherence between text and non-text
+regions. To leverage the strengths of both approaches, we
+introduce the TIGER framework. As illustrated in Fig. 2,
+the TIGER framework is composed of 2 stages, theText
+Restoration stageand theImage Enhancement stage. In
+the text restoration stage, we extract the text regions from
+the LR inputx L ∈R H×W×C and feed them into the
+glyph structure restoration model to restore the text struc-
+ture based on the text region of the LR input and the pre-
+dicted text. We then reassemble the text structures to their
+original positions to obtain a text maskˆxm ∈R H×W×C . In
+the image enhancement stage, the text mask and LR input
+are then processed by a ControlNet-like network to obtain
+the enhanced SR outputˆxH ∈R H×W×C . The following
+sections detail each stage.
+3.2. Text Restoration stage
+Text Restoration Pipeline.Existing methods like Hi-
+SAM [49] work well on clean high-resolution text but fail
+on the incomplete, distorted text in low-resolution images.
+To address this, we propose a region-level text restoration
+pipeline shown in Fig. 2 built on [35] to recover glyph
+structuresx m ∈R H×W×C . An OCR detector first local-
+izes text regions{x 0
+L, ..., xN−1
+L }and extracts their contents
+{y0, ..., yN−1 }as semantic conditions. Each region˜x L is
+encoded by V AE [21] into˜zL ∈R h×w×c, concatenated
+with noisez T ∈R h×w×2c, and iteratively denoised by a
+UNetϵ θ into two branches:z RGB
+t−1 ∈R h×w×c for appear-
+ance andz m
+t−1 ∈R h×w×c for structure, which are merged
+asz t−1. The text contentyis embedded intoc te and fused
+3
+Real-CE
+GT (52mm)
+UZ-ST
+GT (200mm)
+Real-CE
+LR (13mm)
+UZ-ST
+LR (35mm)
+Cascade Coarse-to-Fine
+Alignment
+Cascade Coarse Alignment
+Matrix 
+Computation
+Warping
+LR n
+Warping
+Matrix 
+Computation
+LR n-1LR n
+LR n-2
+…
+Matrix 
+Computation Warping
+GT
+Coarse Aligned LR n
+WarpingMatrix 
+Computation
+GT Coarse Aligned LR n
+Fine Aligned LR n
+Input Images
+GT (200mm)LR 1 (85mm)LR 2 (35mm)LR 3 (14mm)
+Cascade Coarse-to-Fine Alignment
+Output Images
+GT (200mm)LR 1 (85mm)LR 2 (35mm)LR 3 (14mm)
+(a) Comparison with Real-CE (b) Alignment Pipeline
+Fine Alignment
+Severe Degradation Light Degradation
+Figure 3. Overview of UZ-ST (UltraZoom-Scene Text). (a) Real-CE LRs show only mild degradation (red box), while UZ-ST LRs exhibit
+stronger degradation (red box), enabling a more comprehensive evaluation. (b) Coarse-to-fine alignment: images are sorted by focal length,
+each warped to the next higher-focal neighbor using an estimated homography matrix, then refined to the 200 mm GT.
+intoz t via cross-attention to guide structure recovery. After
+Tdenoising steps, the mask branch outputz m
+0 is decoded
+into˜xm, and all restored regions are assembled into the fi-
+nal text maskˆxm. Focusing on real text reconstruction en-
+ables the model to capture glyph structures without non-text
+interference and reduces sensitivity to text saliency.
+Training Strategy.The scarcity of real-world segmentation
+masks for degraded text forces reliance on synthetic data,
+yet its artificial degradation limits generalization. Annotat-
+ing real degraded samples, however, is labor-intensive and
+costly. To marry synthetic precision with real-world degra-
+dation, we propose a two-phase training strategy. In Phase
+1, both synthetic and real data are included in training. This
+allows the model to generate text masks from the LR im-
+age and capture real-world degradation patterns. However,
+noisy masks in real data degrade mask quality. To address
+this, we freeze the RGB out block and the mask out block
+and train the UNet with only synthetic data to refine the
+quality of output text masks in Phase 2. The training objec-
+tive is described as follows:
+L=λ tdLtd +λ SegLSeg,(1)
+whereL td,L Seg,λ td, andλ Seg denote the text-control
+diffusion loss, segmentation-oriented loss, and their corre-
+sponding hyperparameters. The text-control diffusion loss
+is formulated as follows:
+Lϵ =E z0,˜zL,cte,t,ϵ∼N(0,1)
+
+∥ϵ−ϵ θ(zt,˜zL,c te,t)∥2
+2
+
+.(2)
+To improve the quality of the text mask, we propose a
+segmentation-oriented loss. Letε t denote the noise pre-
+dicted by the denoiser networkϵ θ. Following [18],z m
+0
+can be estimated by combining the time steptwith the
+noisy latent imagezm
+t . This estimate is subsequently passed
+through the V AE decoder to obtain an approximate recon-
+struction of the original input text mask, denoted asx ′m
+0 . In
+this way, text mask generation can be supervised at the pixel
+level. We combine Mean Squared Error (MSE), Focal, and
+Dice Losses, commonly used in segmentation tasks [49], to
+comparex ′m
+0 with the original imagex m
+0 :
+LSeg =∥x ′m
+0 −x m
+0 ∥2
+2 +λ Focal FocalLoss(x′m
+0 , xm
+0 )
++λDiceDiceLoss(x′m
+0 , xm
+0 ), (3)
+whereλ Focal andλ Dice are their respective balancing coef-
+ficients. This combination forms a novel text-first paradigm
+that equips the model with both structural accuracy and real-
+world generalization, laying the foundation for the subse-
+quent full-image super-resolution stage.
+3.3. Image Enhancement stage
+Image Enhancement pipeline.To effectively take advan-
+tage of the generated glyph structureˆx m and enhance the
+quality of LRx L, we adopt a ControlNet [56] networkϵ ϕ.
+As illustrated in Fig. 2, after getting their latent representa-
+tionˆzm andz L, we use the network to denoise thezL only at
+the specific timestept, using the null-text embeddingc Null .
+The output super-resolved latent representationˆzH will be
+denoted as:
+ˆzH =z L −σ tϵϕ(zL,ˆzm, t, cNull ),(4)
+whereσ t is a scalar determined by the predefined diffusion
+time step. With the text restoration stage, this image en-
+hancement pipeline forms a progressive ‘text-first, image
+4
+after’ paradigm. Our design injects structure-aware control
+into the generative process, allowing the network to enhance
+global image quality while preserving text structures.
+Training Strategy.For the quality of image super-
+resolution, we constrain the reconstruction loss between the
+predicted high-resolution imageˆxH decoded fromˆzH by
+εand the ground truth high-resolution imagex H using a
+weighted sum of MSE and LPIPS losses:
+Limg =λ l2∥xH −ˆxH∥2
+2 +λ LPIPS LPIPS(xH,ˆxH),(5)
+whereλ l2 andλ LPIPS are balancing coefficients for differ-
+ent loss terms. To enhance glyph control and emphasize the
+glyph structure, we extract the text boundaries using Sobel
+operators [34]. This edge loss is expressed as:
+Ledge =∥Sobel(x H)−Sobel(ˆxH)∥2
+2.(6)
+We combine the two loss terms and useλedge as the balanc-
+ing coefficient in the complete loss function for stage 2:
+L=L img +λ edgeLedge.(7)
+The combination of glyph-aware ControlNet condition-
+ing and edge-constrained training objectives enables our
+model to preserve stroke integrity while harmonizing text
+and background appearance.
+4. Dataset and Benchmark
+Existing datasets like Ma et al. [31] offer only subtle degra-
+dation, as shown in Fig. 3 (a), making them insufficient
+for evaluating model robustness. To address the lack of
+both challenging and publicly available datasets tailored
+for scene text image super-resolution, especially for Chi-
+nese text, we introduceUZ-ST, a challenging real-world
+benchmark. It is collected using ViVO X200 Ultra equipped
+with four fixed focal lengths (14 mm, 35 mm, 85 mm, 200
+mm), enabling image pairs with extreme×14.29zoom.
+It includes diverse scenes—street views, book covers, ad-
+vertisements, menus, and posters—captured under varied
+lighting, with all text lines manually annotated. However,
+such extreme zoom introduces severe misalignment that
+breaks pixel-wise optimization methods like [2], originally
+designed for moderate×2to×4zoom. To address this,
+we design aCascade Coarse-to-fine Alignmentpipeline
+(see Fig. 3 (b)): images are first sorted by focal length, and
+each low-quality image is sequentially aligned to its next
+higher-focal neighbor using optimization-based registration
+or feature-based extractors [22, 29], then refined against the
+200 mm ground truth. Finally, we manually filter or realign
+problematic cases to ensure precise alignment.
+Through meticulous annotation and alignment, we ob-
+tained 5,036 image pairs with 49,675 text lines. We treat
+images captured under 200 mm focal lengths as GT, yield-
+ing 1,439, 1,798, and 1,799 pairs for the×14.29,×5.71,
+and×2.35zoom modes, respectively. Among them, we
+randomly select 470, 589, and 581 pairs for evaluation un-
+der each zoom mode. Each image pair contains one or more
+text lines. These evaluation sets allow us to assess model
+performance in more complex and challenging scenarios.
+For the UZ-ST-benchmark, we utilize 5 evaluation met-
+rics to examine the quality of image super-resolution on the
+scale of the full image. Firstly, we adopt Peak Signal-to-
+Noise Ratio (PSNR), Structural Similarity Index Measure
+(SSIM) [42], Learned Perceptual Image Patch Similarity
+(LPIPS) [57], Deep Image Structure and Texture Similarity
+(DISTS) [10], and Fr ´echet Inception Distance (FID) [17]
+for evaluation of image quality. Specifically, PSNR and
+SSIM are computed in the pixel space to quantify low-level
+reconstruction fidelity, LPIPS and DISTS are computed in
+the feature space to assess perceptual similarity, and FID
+is employed to evaluate the distributional discrepancy be-
+tween generated and real images. However, these metrics
+do not directly reflect the quality or accuracy of super-
+resolved text. To address this, we crop annotated text re-
+gions from the images and compute PSNR, SSIM, LPIPS,
+and DISTS on these cropped regions, denoted as PSNRcr,
+SSIMcr, LPIPScr, and DISTScr. For text accuracy, we ap-
+ply an OCR model to recognize the text and compare its
+outputs with the ground-truth annotations using the Leven-
+shtein ratio [54]:
+OCR-A= Len(spred) +Len(sgt)−Dist(s pred, sgt)
+Len(spred) +Len(sgt) ,
+(8)
+wheres pred stands for the predicted text sequence,s gt de-
+notes annotated ground-truth text sequence, and Dist(·,·)is
+the Levenshtein distance between text sequences.
+5. Experiment
+5.1. Implementation Details
+We combine synthetic data (built upon LSDIR [26] with
+text rendered via LBTS [38] and Real-ESRGAN [44] degra-
+dation) and real data from Real-CE [31] and UZ-ST. Mis-
+aligned pairs in Real-CE are filtered and reannotated, yield-
+ing 337 training and 188 testing pairs. Stage 1 uses cropped
+text regions and is trained using an IDM-based architec-
+ture [58] with combined segmentation and reconstruction
+losses. Stage 2 is based on Stable Diffusion 3.5 [16] and
+employs a tile-based inference strategy [19, 50]; it is pre-
+trained on synthetic data and fine-tuned on real data. For
+more details, see the Sec. 11.
+5.2. Comparison Results
+5.2.1. Quantitative Results
+We evaluate existing competing methods, including GAN-
+based image super-resolution approaches such as Real-
+ESRGAN [44] and HAT [5]; diffusion-based approaches
+5
+Table 2. Evaluation results on image quality and text accuracy. Numbers inboldindicate the best performance. TIGER performs best.
+Methods Real-CE UZ-ST
+PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑
+Real-ESRGAN 22.30 0.787 0.239 0.188 53.60 56.0% 23.99 0.790 0.248 0.194 30.60 37.1%
+HAT 23.61 0.830 0.214 0.176 51.16 56.6% 25.17 0.815 0.249 0.198 30.12 37.9%
+MARCONet 21.89 0.785 0.238 0.150 52.97 55.0% 22.13 0.768 0.306 0.205 34.28 33.4%
+SeeSR 23.59 0.822 0.195 0.169 43.75 37.4% 23.64 0.788 0.219 0.184 26.73 22.8%
+SupIR 21.78 0.723 0.310 0.198 44.94 27.8% 23.62 0.754 0.308 0.207 27.91 23.6%
+DiffTSR 22.10 0.768 0.278 0.168 44.91 44.1% 22.41 0.767 0.300 0.189 31.25 31.7%
+DiffBIR 22.44 0.747 0.260 0.201 46.44 37.6% 23.67 0.724 0.262 0.197 23.10 26.6%
+OSEDiff 21.86 0.771 0.197 0.127 41.00 26.8% 25.07 0.819 0.201 0.169 20.53 28.9%
+DreamClear 22.47 0.772 0.216 0.157 38.97 50.2% 24.10 0.773 0.238 0.191 21.75 21.4%
+TSD-SR 21.43 0.754 0.220 0.175 47.21 34.9% 22.79 0.757 0.207 0.194 24.08 26.6%
+DiT4SR 20.54 0.764 0.268 0.186 49.79 29.2% 23.16 0.767 0.215 0.159 20.58 23.7%
+TADiSR 23.83 0.790 0.286 0.154 44.42 64.7% 24.61 0.796 0.203 0.160 36.61 36.6%
+TIGER (Ours) 24.12 0.839 0.164 0.125 38.72 67.3% 25.48 0.830 0.196 0.156 20.01 43.0%
+Table 3. Evaluation of image quality on text regions and text accuracy compared to LR (∆OCR-A). TIGER achieves the best performance.
+Methods Real-CE UZ-ST
+PSNRcr↑SSIM cr ↑LPIPS cr ↓DISTS cr ↓∆OCR-A↑PSNR cr ↑SSIM cr ↑LPIPS cr ↓DISTS cr ↓∆OCR-A↑
+Real-ESRGAN 21.71 0.824 0.257 0.224 -8.8% 21.25 0.786 0.302 0.266 -4.7%
+HAT 23.03 0.862 0.249 0.239 -8.2% 22.18 0.813 0.291 0.276 -3.9%
+MARCONet 20.68 0.786 0.267 0.223 -9.8% 17.48 0.690 0.529 0.366 -8.3%
+SeeSR 22.74 0.844 0.237 0.212 -27.4% 20.45 0.767 0.297 0.241 -18.9%
+SupIR 19.96 0.778 0.326 0.263 -37.0% 20.10 0.756 0.344 0.287 -18.2%
+DiffTSR 20.46 0.818 0.275 0.239 -20.7% 17.00 0.665 0.452 0.313 -10.0%
+DiffBIR 21.20 0.792 0.278 0.224 -27.2% 20.70 0.757 0.302 0.245 -15.2%
+OSEDiff 19.38 0.768 0.269 0.208 -38.0% 21.43 0.798 0.276 0.263 -12.8%
+DreamClear 22.74 0.845 0.190 0.168 -14.6% 20.50 0.768 0.317 0.276 -20.3%
+TSD-SR 19.33 0.763 0.279 0.234 -29.9% 19.42 0.748 0.296 0.249 -15.1%
+DiT4SR 17.95 0.738 0.317 0.244 -35.6% 19.73 0.760 0.273 0.216 -18.0%
+TADiSR 23.39 0.855 0.253 0.258 -1.0% 21.59 0.799 0.360 0.336 -5.1%
+TIGER (Ours) 23.43 0.864 0.173 0.167 +2.5% 22.22 0.814 0.228 0.212 +1.3%
+such as SeeSR [47], SupIR [50], DiffBIR [27], OSED-
+iff [46], DreamClear [1], TSD-SR [14], and DiT4SR [15];
+as well as text-focused reconstruction methods such as
+MARCONet [25], DiffTSR [58], and TADiSR [19]. Eval-
+uations are performed on the Real-CE Benchmark [31] and
+the benchmark described in Sec. 4. To ensure fairness, we
+fine-tune the released pre-trained models on the training sets
+of both benchmarks using the official code when available.
+Following [19], we integrate the outputs of MARCONet
+and DiffTSR with HAT-generated results to simulate real-
+world application scenarios and enable comprehensive full-
+image evaluation. We evaluate Real-CE at the hardest dif-
+ficulty level (×4), while UZ-ST is evaluated across all dif-
+ficulty levels—with average results reported here. Detailed
+per-level evaluations appear in the Sec. 14.
+As shown in Tab. 2 and Tab. 3 , TIGER outperforms
+competing methods on both the Real-CE and UZ-ST bench-
+marks in terms of image quality and text accuracy. TADiSR,
+limited by the resolution of its cross-attention mechanism,
+performs poorly under severe degradation and with small
+text. DiffTSR and MARCONet fail to effectively handle
+text backgrounds and struggle with text regions that have a
+large width-to-height aspect ratio. In contrast, our method
+restores images with high quality and fine-grained text, ow-
+ing to the decoupling strategy. It achieves OCR-A scores
+above 0.67 and 0.43, and demonstrates overall superiority
+in both pixel-level and perceptual accuracy.
+5.2.2. Qualitative Results
+Fig. 4 shows visual comparisons on Real-CE and UZ-ST.
+Real-world degradations cause noise, blurred strokes, and
+distortions in the input images. GAN-based methods reduce
+noise but fail to fix text structure, while diffusion-based SR
+methods, though powerful, lack text-structure guidance and
+often distort strokes, sometimes making text unreadable.
+Methods tailored for text image super resolution (e.g.,
+MARCONet and DiffTSR) exhibit limitations in processing
+long text sequences, often generating distorted or semanti-
+cally meaningless results. They also lack global semantic
+guidance, making it hard to blend text regions with back-
+grounds. As seen in Fig. 4 (a), DiffTSR+HAT (red box) pro-
+duces text colors inconsistent with the original LR and SR
+output of HAT. In Fig. 4 (b), it even distorts the face near the
+word “Ory”. TADiSR works well on lightly degraded im-
+ages but fails under severe degradation and performs poorly
+on small text due to cross-attention mask resolution limits.
+Our method overcomes these issues, restoring high-quality
+glyph structures even in challenging cases.
+6
+LR DreamClear
+OSEDiff SUPIRHAT
+DiT4SR TIGER MaskTADISR TIGER (Ours)DiffTSR+HAT
+LR DreamClearOSEDiff SUPIRHAT
+DiT4SR TIGER MaskTADISR TIGER (Ours)MARCONet+HAT
+(a) Visual comparison on Real-CE. Our decoupling strategy yields superior performance on small text.
+(b) Visual comparison on UZ-ST, showing robustness to severe degradation with 2 -phase training.
+Figure 4. Qualitative Evaluation on Real-CE and UZ-ST.
+5.3. Ablation Study
+Effectiveness of the training set.Tab. 4 reports con-
+sistent OCR-A improvements across different architec-
+tures, including the UNet-based OSEDiff and the DiT-based
+DiT4SR. This demonstrates that even models without ex-
+plicit mechanisms for text structure modeling can still learn
+the mapping from low- to high-resolution text using our
+dataset, further validating its effectiveness. Due to their lack
+of a dedicated mechanism for text structure modeling, they
+cannot outperform our methods.
+OCR Influence.To investigate how OCR prediction affects
+the accuracy of our framework, we set the predicted text by
+OCR in stage 1 asnull textorrandom textand test them
+on the 35mm subset of UZ-ST. As shown in Tab. 5, even
+without the OCR model’s predicted text, our method attains
+a strong OCR-A score of 40.4%, outperforming TAiDSR.
+This demonstrates that our model in stage 1 benefits from
+the inherent text structure in the LR input to restore text
+structure and is not overly dependent on the OCR model.
+7
+Std Font Guidance SAM-TS Extraction LDM Guidance TIGER (Ours)
+Empty mask Guidance
+Figure 5. Qualitative Results of Ablation Study with stage 2 fixed as the baseline.
+Table 4. Validation on the effectiveness of UZ-ST. Finetuning im-
+proves OCR-A, proving effectiveness.
+Methods PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑
+OSEDiff w/o UZ-ST 23.50 0.7910.197 0.16224.30 22.8%
+OSEDiff w/ UZ-ST25.07 0.8190.201 0.16920.53 28.9%
+DiT4SR w/o UZ-ST 22.58 0.754 0.252 0.196 26.93 19.3%
+DiT4SR w/ UZ-ST23.17 0.767 0.215 0.159 20.58 23.7%
+Ours w/o UZ-ST 22.96 0.782 0.341 0.253 33.78 40.0%
+Ours w/ UZST25.48 0.830 0.196 0.156 20.01 43.0%
+Table 5. Ablation on OCR prediction. The model remains strong
+with null or random OCR text, indicating limited reliance on OCR.
+Methods PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑
+TADiSR 24.68 0.795 0.362 0.227 52.13 35.5%
+Null Text 25.590.8340.188 0.151 28.93 40.4%
+Random Text 25.60 0.833 0.1880.15028.92 40.3%
+Predicted Text (Ours) 25.63 0.834 0.185 0.150 28.82 44.6%
+Effectiveness of the TIGER component.We set stage 2
+as the fixed baseline for image restoration and validate the
+effectiveness of our framework through 4 ablated variants:
+•Empty Mask Guidance.As shown in Tab. 4, empty
+masks provide zero structure guidance, and the model can
+only rely on the LR for text restoration. Therefore, the
+OCR-A drops from 67.3% to 59.5%.
+•Standard Font Guidance.As shown in the second
+column of Fig. 5, the standard font, while structurally cor-
+rect, provides weak guidance due to style and position mis-
+matches. As a result, the restored text exhibits poor accu-
+racy compared to TIGER, with the OCR-A dropping from
+67.1% to 55.3%, as shown in Tab. 6.
+•SAM-TS Extraction[19, 49]. While this improves vi-
+sual quality by better aligning output masks with the LR im-
+age, SAM-TS can only extract distorted structures and can’t
+recover degraded text (Fig. 5, third column), leading to sub-
+optimal performance compared with TIGER, with OCR-A
+dropping from 0.671 to 0.579.
+•LDM Guidance.This variant uses a latent diffusion
+model conditioned on LR to restore text structure, achiev-
+ing better accuracy by reconstructing or compensating for
+Table 6. Ablation study on Real-CE with stage 2 fixed as the base-
+line. From top to bottom, we compare the performance of using
+text masks rendered with astandard font, extracted usingSAM-
+TS, reconstructed withlatent diffusion modelconditioned on LR,
+and reconstructed with ourtext restoration pipeline. Our pipeline
+faithfully restores glyph structures, yielding the highest accuracy.
+Text Mask Settings PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑
+Empty Mask 23.33 0.792 0.225 0.172 42.93 59.5%
+Std Font Guidance 23.31 0.786 0.249 0.164 41.83 55.3%
+SAM-TS Extraction 23.91 0.835 0.212 0.147 41.22 57.9%
+LDM Guidance 22.42 0.798 0.222 0.147 43.08 60.1%
+TIGER (Ours) 24.12 0.839 0.164 0.125 38.72 67.3%
+lost text. However, without separate learning from synthetic
+and real-world data, it struggles with high-quality text struc-
+tures in real-world scenarios. As shown in Fig. 5, fourth
+column, the masks remain noisy under real-world degrada-
+tions, leading to lower accuracy than TIGER, with OCR-A
+dropping from 67.1% to 60.1% as reported in Tab. 6.
+Our method uses RGB output to jointly learn from real-
+world degradations and accurate synthetic masks, yielding
+high-quality masks and achieving the highest accuracy.
+6. Conclusion
+In this paper, we delve into the extensively researched prob-
+lem of scene text super-resolution. To address this chal-
+lenge, we propose a novel approach, TIGER, that decou-
+ples glyph structure restoration from image enhancement.
+For the restoration of text structure, we propose the text
+restoration pipeline, which enables a 2-phase training strat-
+egy to fully take advantage of both synthetic and real-world
+data. For the image enhancement, we propose the image
+enhancement pipeline, which effectively utilizes the glyph
+structure to restore both text fidelity and image details co-
+herently in full-image super-resolution. In terms of training
+data and benchmark, we present the UltraZoom-ST, the first
+real-world scene text dataset that contains extreme zoom-
+ing mode, offering more challenging scenarios for the field.
+Extensive experiments on Real-CE and UZ-ST demonstrate
+the superiority of TIGER over existing methods.
+8
+References
+[1] Yuang Ai, Xiaoqiang Zhou, Huaibo Huang, Xiaotian Han,
+Zhengyu Chen, Quanzeng You, and Hongxia Yang. Dream-
+clear: High-capacity real-world image restoration with
+privacy-safe dataset curation.Advances in Neural Informa-
+tion Processing Systems, 37:55443–55469, 2024. 2, 6
+[2] Jianrui Cai, Hui Zeng, Hongwei Yong, Zisheng Cao, and Lei
+Zhang. Toward real-world single image super-resolution:
+A new benchmark and a new model. InProceedings of
+the IEEE/CVF international conference on computer vision,
+pages 3086–3095, 2019. 5, 2
+[3] Huiwen Chang, Han Zhang, Jarred Barber, Aaron
+Maschinot, Jos ´e Lezama, Lu Jiang, Ming-Hsuan Yang,
+Kevin Patrick Murphy, William T. Freeman, Michael Ru-
+binstein, Yuanzhen Li, and Dilip Krishnan. Muse: Text-to-
+image generation via masked generative transformers. InIn-
+ternational Conference on Machine Learning, ICML 2023,
+23-29 July 2023, Honolulu, Hawaii, USA, pages 4055–4075.
+PMLR, 2023. 1
+[4] Jingye Chen, Bin Li, and Xiangyang Xue. Scene text tele-
+scope: Text-focused scene image super-resolution. InCVPR,
+pages 12026–12035, 2021. 3
+[5] Xiangyu Chen, Xintao Wang, Jiantao Zhou, Yu Qiao,
+and Chao Dong. Activating more pixels in image super-
+resolution transformer. InCVPR, pages 22367–22377, 2023.
+5
+[6] Kun Cheng, Lei Yu, Zhijun Tu, Xiao He, Liyu Chen, Yong
+Guo, Mingrui Zhu, Nannan Wang, Xinbo Gao, and Jie Hu.
+Effective diffusion transformer architecture for image super-
+resolution. InProceedings of the AAAI Conference on Arti-
+ficial Intelligence, pages 2455–2463, 2025. 2
+[7] Cheng Cui, Ting Sun, Manhui Lin, Tingquan Gao, Yubo
+Zhang, Jiaxuan Liu, Xueqing Wang, Zelun Zhang, Changda
+Zhou, Hongen Liu, Yue Zhang, Wenyu Lv, Kui Huang,
+Yichao Zhang, Jing Zhang, Jun Zhang, Yi Liu, Dianhai Yu,
+and Yanjun Ma. Paddleocr 3.0 technical report, 2025. 1
+[8] Gayatri Deshmukh, Onkar Susladkar, Dhruv Makwana,
+Sparsh Mittal, et al. Textual alchemy: Coformer for scene
+text understanding. InProceedings of the IEEE/CVF Win-
+ter Conference on Applications of Computer Vision, pages
+2931–2941, 2024. 1
+[9] Prafulla Dhariwal and Alexander Nichol. Diffusion models
+beat gans on image synthesis.Advances in neural informa-
+tion processing systems, 34:8780–8794, 2021. 1
+[10] Keyan Ding, Kede Ma, Shiqi Wang, and Eero P Simoncelli.
+Image quality assessment: Unifying structure and texture
+similarity.TPAMI, 44(5):2567–2581, 2020. 5
+[11] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou
+Tang. Learning a deep convolutional network for image
+super-resolution. InECCV, pages 184–199, 2014. 3
+[12] Chao Dong, Ximei Zhu, Yubin Deng, Chen Change Loy, and
+Yu Qiao. Boosting optical character recognition: A super-
+resolution approach.arXiv preprint, 2015. 3
+[13] Linwei Dong, Qingnan Fan, Yihong Guo, Zhonghao Wang,
+Qi Zhang, Jinwei Chen, Yawei Luo, and Changqing Zou.
+TSD-SR: one-step diffusion with target score distillation for
+real-world image super-resolution. InIEEE/CVF Conference
+on Computer Vision and Pattern Recognition, CVPR 2025,
+Nashville, TN, USA, June 11-15, 2025, pages 23174–23184.
+Computer Vision Foundation / IEEE, 2025. 1
+[14] Linwei Dong, Qingnan Fan, Yihong Guo, Zhonghao Wang,
+Qi Zhang, Jinwei Chen, Yawei Luo, and Changqing Zou.
+Tsd-sr: One-step diffusion with target score distillation for
+real-world image super-resolution. InProceedings of the
+Computer Vision and Pattern Recognition Conference, pages
+23174–23184, 2025. 2, 6
+[15] Zheng-Peng Duan, Jiawei Zhang, Xin Jin, Ziheng Zhang,
+Zheng Xiong, Dongqing Zou, Jimmy Ren, Chun-Le Guo,
+and Chongyi Li. Dit4sr: Taming diffusion transformer for
+real-world image super-resolution. InProceedings of the
+IEEE/CVF International Conference on Computer Vision,
+2025. 1, 2, 6
+[16] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim
+Entezari, Jonas M ¨uller, Harry Saini, Yam Levi, Dominik
+Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling recti-
+fied flow transformers for high-resolution image synthesis.
+InForty-first international conference on machine learning,
+2024. 5, 1
+[17] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+two time-scale update rule converge to a local nash equilib-
+rium.NeurIPS, 30, 2017. 5
+[18] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffu-
+sion probabilistic models.Advances in Neural Information
+Processing Systems, 33:6840–6851, 2020. 1, 4
+[19] Qiming Hu, Linlong Fan, Yiyan Luo, Yuhang Yu, Xiaojie
+Guo, and Qingnan Fan. Text-aware real-world image super-
+resolution via diffusion model with joint segmentation de-
+coders.arXiv preprint arXiv:2506.04641, 2025. 1, 3, 5, 6,
+8
+[20] Jihyung Kil, Soravit Changpinyo, Xi Chen, Hexiang Hu, Se-
+bastian Goodman, Wei-Lun Chao, and Radu Soricut. Prestu:
+Pre-training for scene-text understanding. InProceedings of
+the IEEE/CVF international conference on computer vision,
+pages 15270–15280, 2023. 1
+[21] Diederik P Kingma and Max Welling. Auto-encoding varia-
+tional bayes.arXiv preprint arXiv:1312.6114, 2013. 3
+[22] Johannes K ¨unzel, Anna Hilsmann, and Peter Eisert. RIPE:
+Reinforcement Learning on Unlabeled Image Pairs for Ro-
+bust Keypoint Extraction.arXiv, 2025. 5
+[23] Chenxia Li, Weiwei Liu, Ruoyu Guo, Xiaoting Yin, Kaitao
+Jiang, Yongkun Du, Yuning Du, Lingfeng Zhu, Baohua Lai,
+Xiaoguang Hu, Dianhai Yu, and Yanjun Ma. Pp-ocrv3: More
+attempts for the improvement of ultra lightweight OCR sys-
+tem.CoRR, abs/2206.03001, 2022. 1
+[24] Peidong Li and Dixiao Cui. Navigation-guided sparse scene
+representation for end-to-end autonomous driving. InThe
+Thirteenth International Conference on Learning Represen-
+tations, ICLR 2025, Singapore, April 24-28, 2025. OpenRe-
+view.net, 2025. 1
+[25] Xiaoming Li, Wangmeng Zuo, and Chen Change Loy.
+Learning generative structure prior for blind text image
+super-resolution. InCVPR, pages 10103–10113, 2023. 1,
+2, 3, 6
+9
+[26] Yawei Li, Kai Zhang, Jingyun Liang, Jiezhang Cao, Ce Liu,
+Rui Gong, Yulun Zhang, Hao Tang, Yun Liu, Denis Deman-
+dolx, et al. Lsdir: A large scale dataset for image restoration.
+InCVPRW, pages 1775–1787, 2023. 5, 1
+[27] Xinqi Lin, Jingwen He, Ziyan Chen, Zhaoyang Lyu, Bo Dai,
+Fanghua Yu, Yu Qiao, Wanli Ouyang, and Chao Dong. Diff-
+bir: Toward blind image restoration with generative diffusion
+prior. InECCV, pages 430–448, 2024. 1, 2, 6
+[28] Ilya Loshchilov and Frank Hutter. Decoupled weight decay
+regularization.arXiv preprint arXiv:1711.05101, 2017. 1
+[29] David G Lowe. Object recognition from local scale-invariant
+features. InProceedings of the seventh IEEE interna-
+tional conference on computer vision, pages 1150–1157.
+Ieee, 1999. 5
+[30] Jianqi Ma, Zhetong Liang, and Lei Zhang. A text atten-
+tion network for spatial deformation robust scene text image
+super-resolution. InCVPR, pages 5911–5920, 2022. 3
+[31] Jianqi Ma, Zhetong Liang, Wangmeng Xiang, Xi Yang, and
+Lei Zhang. A benchmark for chinese-english scene text im-
+age super-resolution. InICCV, pages 19452–19461, 2023.
+2, 5, 6, 1
+[32] Yongqiang Mou, Lei Tan, Hui Yang, Jingying Chen, Leyuan
+Liu, Rui Yan, and Yaohong Huang. Plugnet: Degrada-
+tion aware scene text recognition supervised by a pluggable
+super-resolution unit. InECCV, pages 158–174, 2020. 3
+[33] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu,
+and Mark Chen. Hierarchical text-conditional image gen-
+eration with clip latents.arXiv preprint arXiv:2204.06125,
+2022. 1
+[34] Richard A Roberts and Clifford T Mullis.Digital signal
+processing. Addison-Wesley Longman Publishing Co., Inc.,
+1987. 5
+[35] Robin Rombach, Andreas Blattmann, Dominik Lorenz,
+Patrick Esser, and Bj¨orn Ommer. High-resolution image syn-
+thesis with latent diffusion models. InCVPR, pages 10684–
+10695, 2022. 1, 3
+[36] Chitwan Saharia, William Chan, Saurabh Saxena, Lala
+Li, Jay Whang, Emily L Denton, Kamyar Ghasemipour,
+Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim Salimans,
+et al. Photorealistic text-to-image diffusion models with deep
+language understanding.Advances in neural information
+processing systems, 35:36479–36494, 2022. 1
+[37] Mohamed Ali Souibgui, Sanket Biswas, Andres Mafla,
+Ali Furkan Biten, Alicia Forn ´es, Yousri Kessentini, Josep
+Llad´os, Lluis Gomez, and Dimosthenis Karatzas. Text-diae:
+a self-supervised degradation invariant autoencoder for text
+recognition and document enhancement. Inproceedings of
+the AAAI conference on artificial intelligence, pages 2330–
+2338, 2023. 1
+[38] Zhengmi Tang, Tomo Miyazaki, and Shinichiro Omachi. A
+scene-text synthesis engine achieved through learning from
+decomposed real-world data.IEEE Transactions on Image
+Processing, 32:5837–5851, 2023. 5, 1
+[39] Yuxiang Tuo, Wangmeng Xiang, Jun-Yan He, Yifeng Geng,
+and Xuansong Xie. Anytext: Multilingual visual text genera-
+tion and editing. InThe Twelfth International Conference on
+Learning Representations, ICLR 2024, Vienna, Austria, May
+7-11, 2024. OpenReview.net, 2024. 1
+[40] Bolin Wang, Xinyi Shen, and Kejun Zhang. Multi-task dif-
+fusion model for simultaneous text and image inpainting. In
+2024 17th International Symposium on Computational Intel-
+ligence and Design (ISCID), pages 301–305. IEEE, 2024. 3
+[41] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, Kelvin CK
+Chan, and Chen Change Loy. Exploiting diffusion prior
+for real-world image super-resolution.IJCV, 132(12):5929–
+5949, 2024. 2
+[42] Wenjia Wang, Enze Xie, Peize Sun, Wenhai Wang, Lixun
+Tian, Chunhua Shen, and Ping Luo. Textsr: Content-aware
+text super-resolution guided by recognition.arXiv preprint,
+2019. 3, 5, 2
+[43] Wenjia Wang, Enze Xie, Xuebo Liu, Wenhai Wang, Ding
+Liang, Chunhua Shen, and Xiang Bai. Scene text image
+super-resolution in the wild. InECCV, pages 650–666, 2020.
+2, 3
+[44] Xintao Wang, Liangbin Xie, Chao Dong, and Ying Shan.
+Real-esrgan: Training real-world blind super-resolution with
+pure synthetic data. InICCV, pages 1905–1914, 2021. 2, 5,
+1
+[45] Yufei Wang, Wenhan Yang, Xinyuan Chen, Yaohui Wang,
+Lanqing Guo, Lap-Pui Chau, Ziwei Liu, Yu Qiao, Alex C
+Kot, and Bihan Wen. Sinsr: diffusion-based image super-
+resolution in a single step. InCVPR, pages 25796–25805,
+2024. 2
+[46] Rongyuan Wu, Lingchen Sun, Zhiyuan Ma, and Lei Zhang.
+One-step effective diffusion network for real-world image
+super-resolution.NeurIPS, 37:92529–92553, 2024. 1, 2, 6
+[47] Rongyuan Wu, Tao Yang, Lingchen Sun, Zhengqiang Zhang,
+Shuai Li, and Lei Zhang. Seesr: Towards semantics-aware
+real-world image super-resolution. InCVPR, pages 25456–
+25467, 2024. 1, 2, 6
+[48] Tao Yang, Rongyuan Wu, Peiran Ren, Xuansong Xie, and
+Lei Zhang. Pixel-aware stable diffusion for realistic im-
+age super-resolution and personalized stylization. InECCV,
+pages 74–91, 2024. 2
+[49] Maoyuan Ye, Jing Zhang, Juhua Liu, Chenyu Liu, Baocai
+Yin, Cong Liu, Bo Du, and Dacheng Tao. Hi-sam: Marrying
+segment anything model for hierarchical text segmentation.
+TPAMI, 2024. 3, 4, 8, 1
+[50] Fanghua Yu, Jinjin Gu, Zheyuan Li, Jinfan Hu, Xiangtao
+Kong, Xintao Wang, Jingwen He, Yu Qiao, and Chao Dong.
+Scaling up to excellence: Practicing model scaling for photo-
+realistic image restoration in the wild. InCVPR, pages
+25669–25680, 2024. 1, 2, 5, 6
+[51] Haiyang Yu, Jingye Chen, Bin Li, Jianqi Ma, Mengnan
+Guan, Xixi Xu, Xiaocong Wang, Shaobo Qu, and Xi-
+angyang Xue. Benchmarking chinese text recognition:
+Datasets, baselines, and an empirical study.arXiv preprint
+arXiv:2112.15093, 2021. 2
+[52] Haiyang Yu, Xiaocong Wang, Bin Li, and Xiangyang Xue.
+Chinese text recognition with a pre-trained clip-like model
+through image-ids aligning. InProceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 11943–
+11952, 2023. 1
+[53] Zongsheng Yue, Jianyi Wang, and Chen Change Loy.
+Resshift: Efficient diffusion model for image super-
+10
+resolution by residual shifting.NeurIPS, 36:13294–13307,
+2023. 2
+[54] Li Yujian and Liu Bo. A normalized levenshtein distance
+metric.TPAMI, 29(6):1091–1095, 2007. 5
+[55] Kai Zhang, Jingyun Liang, Luc Van Gool, and Radu Timo-
+fte. Designing a practical degradation model for deep blind
+image super-resolution. InICCV, pages 4791–4800, 2021. 2
+[56] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding
+conditional control to text-to-image diffusion models. In
+ICCV, pages 3836–3847, 2023. 2, 4
+[57] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. InCVPR, pages 586–595,
+2018. 5
+[58] Yuzhe Zhang, Jiawei Zhang, Hao Li, Zhouxia Wang, Luwei
+Hou, Dongqing Zou, and Liheng Bian. Diffusion-based blind
+text image super-resolution. InCVPR, pages 25827–25836,
+2024. 2, 3, 5, 6, 1
+[59] Zhanjie Zhang, Quanwei Zhang, Wei Xing, Guangyuan Li,
+Lei Zhao, Jiakai Sun, Zehua Lan, Junsheng Luan, Yiling
+Huang, and Huaizhong Lin. Artbank: Artistic style transfer
+with pre-trained diffusion model and implicit style prompt
+bank. InProceedings of the AAAI conference on artificial
+intelligence, pages 7396–7404, 2024. 1
+11
+Restore Text First, Enhance Image Later: Two-Stage Scene Text Image
+Super-Resolution with Glyph Structure Guidance
+Supplementary Material
+7. Reproducibility Statement
+To ensure reproducibility, we have made the following ef-
+forts:
+1. We will release our code and dataset.
+2. We provide implementation details in Sec. 5.1 and
+Sec. 11, including the training process and selection of
+hyper-parameters.
+3. We provide details on evaluation metrics and dataset
+preparation in Sec. 4 and Sec. 10, and the code and data
+will be made available along with it.
+8. Ethics Statement
+This work focuses on improving scene text image super-
+resolution to support beneficial applications such as en-
+hancing accessibility, document restoration, and navigation
+assistance. However, we acknowledge potential risks, in-
+cluding misuse in privacy-sensitive contexts (e.g., recov-
+ering text from personal or social media images) or unin-
+tended deployment in surveillance. To mitigate such risks,
+users are encouraged to combine our methods with privacy-
+preserving techniques such as watermarking or selective in-
+painting. Our UZ-ST dataset was collected from public,
+non-sensitive scenes under ethical guidelines, without in-
+cluding personally identifiable or private information. We
+believe the societal benefits of improved text image restora-
+tion outweigh potential risks, provided that the technology
+is applied responsibly.
+9. LLM Acknowledgments
+We thank ChatGPT (GPT-5) and DeepSeek for the help in
+refining the language and improving clarity. All wording
+and factual content were reviewed and approved by the au-
+thors.
+10. Dataset Collection
+We use VIVO X200 Ultra to collect images for 4 separate
+focal lengths (14 mm, 35 mm, 84 mm, and 200 mm). We
+first use PP-OCRV5 [7] for the rough annotation, then we
+manually filter the images and annotations. During the fil-
+tering and annotation, each image undergoes the following
+rules:
+• Width or height of the image should be no less than 256.
+• Height of the text should not be less than 32 pixels.
+• Score of OCR recognition of the text should not be lower
+than 0.9.
+• Content of the text should not be empty or consist solely
+of whitespace.
+11. More Implementation Details
+Dataset Settings.For training, we combine a synthetic
+dataset with real paired datasets (Real-CE [31] and UZ-
+ST). Our synthetic dataset builds upon LSDIR [26], con-
+taining 27,000 triplets(x H, xL, xm). We render text on the
+GT of LSDIR and the corresponding text mask using the
+LBTS [38], then apply Real-ESRGAN degradation Wang
+et al. [44] to generate LR images. Since there are mis-
+aligned image pairs in Real-CE [19, 58] and text lines not
+annotated, we filter out misaligned image pairs and reanno-
+tate the images manually. In the end, we obtain 337 train-
+ing pairs and 188 testing pairs from the Real-CE dataset.
+Images under 13mm and 52mm focal lengths are consid-
+ered as LRx L and GTx H, respectively. Following Hu
+et al. [19], we use SAM-TS [49] to obtain the text maskxm
+fromx H. UZ-ST triplets(x H, xL, xm)are processed iden-
+tically. For stage 1 training, we use cropped text regions
+from the dataset, while for stage 2, we use full images. Fol-
+lowing [39], we use PP-OCRv3 [23] to extract strings from
+the text region of predicted SR for evaluation of OCR-A.
+Training Details.For stage 1, we build our model based
+on the IDM baseline of DiffTSR [58]. We setλ td,λ Seg,
+λFocal , andλ Dice as1,0.1,20, and1respectively. In
+stage 2, our model is built upon Stable Diffusion 3.5
+medium [16] and follows a similar tile-based inference
+strategy to TADiSR [19] and SUPIR [50]. The timestept
+is set to150. The conditioning scale of the ControlNet is
+set to 1.0.λ l2,λ LPIPS , andλ edge are set to1,5,100when
+using the synthetic dataset for pretraining. Then,λ edge is
+set to0and the remaining coefficients are kept unchanged
+when training on real paired datasets. We train both stages
+of the model using the AdamW [28] optimizer and set the
+learning rate to5×10 −5 and5×10 −6 for stages 1 and 2
+separately. All experiments are conducted on NVIDIA H20
+GPUs. For stage 1, we train the model on synthetic and real
+datasets for 8 epochs, then finetune it on synthetic data for
+2 epochs. For stage 2, we first pretrain the model on the
+synthetic dataset for 50 epochs. Then we train on the real
+paired datasets for 50 epochs.
+12. More details of UZ-ST
+In Tab. 7, we provide detailed statistics on the composition
+of the UZ-ST dataset. Additionally, in Fig. 10, we present
+1
+Table 7. Statistics of dataset size and line count in subsets of UltraZoom-ST.
+Subset image count line count mean lines/img img>5 lines
+14 mm 1,439 15,073 10.47 754
+35 mm 1,798 17,263 9.60 867
+85 mm 1,799 17,339 9.64 869
+Table 8. Alignment comparison.
+Alignment Method PSNR↑MSE↓SSIM↑NCC↑AKD↓
+RealSR 13.87 4002.65 0.5072 0.3285 546.78
+SIFT Alignment (Single time) 12.77 6332.79 0.4896 0.4313 546.78
+Cascade Coarse-to-Fine Alignment (Ours) 23.00 441.52 0.7279 0.9184 241.44
+some example images from the dataset.
+13. Alignment Comparison
+We compare our proposed Cascade Coarse-to-Fine align-
+ment strategy with the alignment method proposed by Re-
+alSR [2] and single-time alignment using SIFT. During the
+comparison, we implement our strategy using SIFT and uti-
+lize the raw images from the 35mm dataset of our proposed
+UZ-ST dataset for evaluation. For metrics, we adopt PSNR,
+Mean Squared Error (MSE), SSIM [42], Normalized Cross-
+Correlation (NCC), and Average Keypoint Distance (AKD)
+to assess the alignment quality of the aligned image.
+As shown in Tab. 8 and Fig. 6, pixel-based optimization
+methods break when handling heavily degraded images due
+to significant loss of details. Keypoint-based alignment like
+SIFT suffers from the lack of valid keypoint for matching.
+While our alignment method outperforms all other meth-
+ods and achieves the best results, this is due to the pro-
+gressive cascade alignment strategy, which breaks the hard
+alignment process into simpler tasks, facilitating the bridg-
+ing between images taken under different focal lengths.
+14. Additional results
+We provide detailed quantitative results of UZ-ST in
+Tab. 11. Additional qualitative results are provided in Fig. 7
+and Fig. 8. Fig. 9 also shows the ability of our method in
+handling other languages like Japanese and Korean.
+We also conduct additional ablation experiment on how
+the randomness of OCR output affect our method. As
+shown in Tab. 10, the text accuracy gains as the randomness
+of the OCR output declines. However, even under complete
+random OCR prediction, our method still manage to out-
+perform TADiSR thanks to the LR condition still guiding
+the stage 1 to generate text structures. This proves that the
+reliance of our method on the OCR model is limited.
+15. Efficiency Analysis
+As shown in Tab. 9, stage 1 is a standard diffusion process
+that takes multiple steps in inference, the efficiency of our
+model may be suboptimal compared to one-step methods.
+However, our method achieves state-of-the-art performance
+in OCR-A, which cannot be easily obtained by extending
+inference time.
+2
+Table 9. Efficiency analysis.
+Methods Flops (GFLOPs) Speed (ms) OCR-A
+HAT 6670.32 1086.68 37.9%
+DiffTSR 58502.14 8610.59 31.7%
+DiT4SR w/o llava 160787.14 17385.14 23.7%
+DreamClear w/o llava 412843.67 83193.81 21.4%
+TADiSR 4497.96 342.32 36.6%
+TIGER (ours) Stage 1 6215.85 663.5 43.0%TIGER (ours) Stage 2 3734.01 360.06
+Table 10. Ablation on the effect of stochastic OCR outputs on the performance of our method. The performance gains as the randomness
+of the OCR output drops. Even under 100% random OCR output, our method still outperforms TADiSR, proving low reliance on OCR.
+Methods PSNR↑SSIM↑LPIPS↓DISTS↓FID↓OCR-A↑
+TADiSR 24.68 0.795 0.362 0.227 52.13 35.5%
+TIGER (Ours) performance under different randomness of OCR output.
+100% Random Text 25.60 0.833 0.1880.15028.92 40.3%
+50% Random Text 25.60 0.833 0.189 0.151 28.92 40.6%
+20% Random Text25.63 0.834 0.185 0.15029.3 43.7%
+0% Random Text (Ours) 25.63 0.834 0.185 0.150 28.82 44.6%
+RealSR SIFT alignment (Single time) Ours GT
+Figure 6. Alignment method comparison.
+3
+Table 11. Evaluation Results on Both Image Quality and Text Accuracy on UltraZoom-ST.
+Methods PSNR↑SSIM↑LPIPS↓DISTS↓FID↓PSNR cr↑SSIM cr↑LPIPS cr↓DISTS cr↓OCR-A↑
+85mm (×2.35)
+Real-ESRGAN 25.84 0.854 0.139 0.130 28.25 23.59 0.843 0.170 0.168 60.8%
+HAT27.33 0.873 0.128 0.133 27.21 24.760.870 0.139 0.146 62.0%
+MACRONet 22.90 0.804 0.234 0.173 40.19 17.92 0.693 0.515 0.360 54.2%
+SeeSR 25.02 0.826 0.167 0.159 32.31 21.62 0.796 0.245 0.207 28.2%
+SupIR 25.58 0.823 0.202 0.160 29.33 21.91 0.808 0.239 0.214 33.3%
+DiffTSR 23.48 0.805 0.230 0.157 35.77 17.92 0.688 0.392 0.285 48.2%
+DiffBIR 25.25 0.793 0.175 0.152 24.57 22.26 0.803 0.218 0.190 36.8%
+OSEDiff 26.38 0.852 0.153 0.137 23.92 22.84 0.833 0.200 0.204 41.0%
+DreamClear 25.31 0.811 0.169 0.151 24.19 21.44 0.790 0.253 0.221 26.8%
+TSD-SR 23.99 0.800 0.161 0.165 30.40 20.62 0.786 0.232 0.218 37.8%
+DiT4SR 24.71 0.810 0.173 0.143 29.15 21.25 0.800 0.221 0.193 48.2%
+TADiSR 26.31 0.858 0.177 0.149 30.47 23.55 0.856 0.175 0.178 55.7%
+Ours 27.00 0.8710.123 0.120 22.34 24.31 0.8600.135 0.142 63.2%
+35mm (×5.71)
+Real-ESRGAN 23.70 0.785 0.218 0.184 42.62 20.86 0.782 0.272 0.235 34.1%
+HAT 25.05 0.819 0.207 0.182 41.32 21.98 0.816 0.250 0.241 34.6%
+MACRONet 22.28 0.774 0.284 0.199 49.14 17.43 0.694 0.523 0.361 31.5%
+SeeSR 23.76 0.795 0.198 0.175 37.92 20.55 0.778 0.271 0.222 25.2%
+SupIR 23.49 0.746 0.302 0.204 41.80 20.00 0.757 0.335 0.282 24.0%
+DiffTSR 22.57 0.773 0.281 0.184 45.78 16.99 0.671 0.443 0.312 31.2%
+DiffBIR 23.76 0.731 0.245 0.196 35.99 20.82 0.770 0.275 0.234 28.6%
+OSEDiff 25.35 0.827 0.192 0.166 29.06 21.62 0.809 0.263 0.263 29.9%
+DreamClear 24.20 0.778 0.209 0.177 32.08 20.66 0.779 0.283 0.251 23.9%
+TSD-SR 22.93 0.757 0.200 0.199 37.61 19.64 0.760 0.282 0.246 27.3%
+DiT4SR 23.45 0.774 0.204 0.158 31.73 20.12 0.779 0.250 0.208 26.5%
+TADiSR 24.68 0.795 0.362 0.227 52.13 21.57 0.798 0.366 0.347 35.5%
+Ours25.63 0.834 0.185 0.150 28.82 22.14 0.823 0.204 0.194 44.6%
+14mm (×14.29)
+Real-ESRGAN 22.09 0.718 0.423 0.284 89.22 18.87 0.721 0.503 0.427 11.5%
+HAT 22.66 0.738 0.451 0.299 89.58 19.27 0.738 0.533 0.484 12.2%
+MACRONet 21.00 0.716 0.422 0.254 79.67 17.01 0.680 0.553 0.382 10.1%
+SeeSR 21.79 0.731 0.310 0.228 64.31 18.87 0.717 0.396 0.308 13.2%
+SupIR 21.38 0.681 0.447 0.268 70.09 17.99 0.690 0.487 0.383 11.0%
+DiffTSR 20.88 0.713 0.412 0.233 74.07 15.87 0.630 0.538 0.348 12.0%
+DiffBIR 21.61 0.630 0.392 0.255 69.64 18.61 0.685 0.438 0.328 11.3%
+OSEDiff 23.11 0.768 0.274 0.214 49.76 19.44 0.740 0.385 0.334 12.7%
+DreamClear 22.45 0.719 0.364 0.260 62.95 19.14 0.725 0.440 0.377 11.7%
+TSD-SR 21.14 0.7050.2730.225 57.07 17.67 0.686 0.393 0.293 11.9%
+DiT4SR 20.88 0.707 0.2820.181 47.4517.36 0.6870.367 0.25311.7%
+TADiSR 22.43 0.721 0.555 0.320 98.44 19.20 0.730 0.585 0.518 14.4%
+Ours23.41 0.7740.301 0.209 54.7419.73 0.748 0.374 0.32216.0%
+Total
+RealEsrGAN 23.99 0.790 0.248 0.194 30.60 21.25 0.786 0.302 0.266 37.1%
+HAT 25.17 0.815 0.249 0.198 30.12 22.18 0.813 0.291 0.276 37.9%
+MARCONet 22.13 0.768 0.306 0.205 34.28 17.48 0.690 0.529 0.366 33.4%
+SeeSR 23.64 0.788 0.219 0.184 26.73 20.45 0.767 0.297 0.241 22.8%
+SupIR 23.62 0.754 0.308 0.207 27.91 20.10 0.756 0.344 0.287 23.6%
+DiffTSR 22.41 0.767 0.300 0.189 31.25 17.00 0.665 0.452 0.313 31.7%
+DiffBIR 23.67 0.724 0.262 0.197 23.10 20.70 0.757 0.302 0.245 26.6%
+OSEDiff 25.07 0.819 0.201 0.169 20.53 21.43 0.798 0.276 0.263 28.9%
+DreamClear 24.10 0.773 0.238 0.191 21.75 20.50 0.768 0.317 0.276 21.4%
+TSD-SR 22.79 0.757 0.207 0.194 24.08 19.42 0.748 0.296 0.249 26.6%
+DiT4SR 23.16 0.767 0.215 0.159 20.58 19.73 0.760 0.273 0.216 23.7%
+TADiSR 24.61 0.796 0.203 0.160 36.61 21.59 0.799 0.360 0.336 36.6%
+Ours25.48 0.830 0.196 0.156 20.01 22.22 0.814 0.228 0.212 43.0%
+4
+LR
+Ours
+SeeSR
+TSD-SR DreamClearDiT4SR
+OSEDiffHAT+MARCONet
+TIGERS(ours)
+HAT
+TADISR
+LR
+TADiSR
+OSEDiff
+SUPIR
+Real-ESRGAN
+ HAT
+DiT4SR
+MARCONet+HAT
+ DiffTSR+HAT
+Figure 7. Additional qualitative results of TIGER.
+5
+SeeSR OSEDiffHAT+DiffTSRHATLR
+TSD-SR DreamClearDiT4SR TIGERS(ours)TADISR
+LR HAT SeeSRDiffTSR+HAT
+OursTADiSROSEDiff
+DiffBIR
+DreamClear
+ DiT4SR
+Figure 8. Additional qualitative results of TIGER.
+6
+TIGER (Ours)LR
+Figure 9. Demonstration of our method under different languages. (Zoom in for more details.)
+7
+200mm85mm35mm14mm
+Figure 10. Detailed examples of UZ-ST.
+8

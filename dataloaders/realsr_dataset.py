@@ -84,10 +84,14 @@ def gt_boxes_collate_fn(batch):
     OCRRepaSystem._detect_boxes would otherwise produce)."""
     batch = [b for b in batch if b is not None]
     out = {"hq": torch.stack([b["hq"] for b in batch], dim=0)}
+    if batch and "lq" in batch[0]:
+        out["lq"] = torch.stack([b["lq"] for b in batch], dim=0)
     if batch and "gt_boxes" in batch[0]:
         out["gt_boxes"] = [b["gt_boxes"] for b in batch]
     if batch and "gt_texts" in batch[0]:
         out["gt_texts"] = [b["gt_texts"] for b in batch]
+    if batch and "is_realce" in batch[0]:
+        out["is_realce"] = torch.stack([b["is_realce"] for b in batch], dim=0)
     return out
 
 
@@ -110,6 +114,16 @@ class TxtPairDataset(Dataset):
         # before, so the online-detection runs are unaffected.
         self.use_gt_boxes = bool(getattr(args, 'ocr_use_gt_boxes', False)) and split == 'train'
         self.gt_boxes_index = None
+
+        # Opt-in real-paired LQ path (Real-CE finetune): instead of synthesizing
+        # the LQ from the GT via on-GPU degradation, load the registered real LQ
+        # image (e.g. 13mm) sharing the GT's filename and apply the SAME crop, so
+        # the model sees the real sensor/focal degradation. Default None -> old
+        # synthetic-degradation behaviour, every other run unaffected.
+        self.real_paired_lq_dir = getattr(args, 'real_paired_lq_dir', None) or None
+        # Mixed SA+Real-CE training (per-sample domain tag + placeholder LQ for SA rows).
+        self.mix_mode = bool(getattr(args, 'mix_realce', False))
+        self.is_realce_domain = bool(getattr(args, 'is_realce_domain', False))
         if self.use_gt_boxes:
             self.gt_crop = RandomCropWithParams(args.resolution)
             self.gt_min_box_size = int(getattr(args, 'ocr_repa_min_box_size', 8))
@@ -175,6 +189,19 @@ class TxtPairDataset(Dataset):
                 out_txt.append(texts_src[bi] if (texts_src is not None and bi < len(texts_src)) else "")
         return out, out_txt
 
+    def _paired_lq_path(self, gt_path):
+        """Real LQ image sharing the GT filename, under real_paired_lq_dir."""
+        return os.path.join(self.real_paired_lq_dir, os.path.basename(gt_path))
+
+    def _apply_same_crop(self, pil_image, scale, crop_x, crop_y):
+        """Reproduce RandomCropWithParams' resize+crop on a second (registered)
+        image so the real LQ aligns pixel-for-pixel with the GT crop."""
+        S = self.args.resolution
+        if scale != 1.0:
+            new_size = tuple(round(x * scale) for x in pil_image.size)
+            pil_image = pil_image.resize(new_size, resample=Image.Resampling.BICUBIC)
+        return pil_image.crop((crop_x, crop_y, crop_x + S, crop_y + S))
+
     def __getitem__(self, idx):
         for retry in range(self.max_retry):
             try:
@@ -185,7 +212,27 @@ class TxtPairDataset(Dataset):
                 if self.split == 'train' and self.use_gt_boxes:
                     gt_img, scale, crop_x, crop_y = self.gt_crop(gt_img)
                     boxes, texts = self._transform_boxes(path, scale, crop_x, crop_y)
-                    return {"hq": self.to_tensor(gt_img), "gt_boxes": boxes, "gt_texts": texts}
+                    out = {"hq": self.to_tensor(gt_img), "gt_boxes": boxes, "gt_texts": texts}
+                    if self.real_paired_lq_dir is not None:
+                        lq_img = self._apply_same_crop(
+                            self._load_rgb(self._paired_lq_path(path)), scale, crop_x, crop_y)
+                        out["lq"] = self.to_tensor(lq_img)
+                    return out
+                if self.split == 'train' and self.real_paired_lq_dir is not None:
+                    # Mixed SA+Real-CE: per-sample real pairing. If a registered real
+                    # LQ exists for this GT (Real-CE tile), replay the crop on it and
+                    # flag has_real_lq=1; otherwise (SA tile) return a zero LQ placeholder
+                    # with has_real_lq=0 so the GPU loop applies synthetic degradation.
+                    # Uniform keys keep default_collate happy across a mixed batch.
+                    gt_img, scale, crop_x, crop_y = RandomCropWithParams(self.args.resolution)(gt_img)
+                    plq = self._paired_lq_path(path)
+                    S = self.args.resolution
+                    if os.path.exists(plq):
+                        lq_img = self._apply_same_crop(self._load_rgb(plq), scale, crop_x, crop_y)
+                        return {"hq": self.to_tensor(gt_img), "lq": self.to_tensor(lq_img),
+                                "has_real_lq": 1}
+                    return {"hq": self.to_tensor(gt_img),
+                            "lq": torch.zeros(3, S, S), "has_real_lq": 0}
                 if self.split == 'train':
                     gt_img = self.random_crop_preproc(gt_img)
                 elif self.split == 'test':

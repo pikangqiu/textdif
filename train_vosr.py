@@ -760,7 +760,17 @@ def main(config_path):
         for batch in train_dataloader:
             hq = batch["hq"].to(accelerator.device, non_blocking=True)
             with torch.no_grad():
-                _, lq = degradation.degrade_process(hq, resize_bak=True)
+                if "has_real_lq" in batch:
+                    # Mixed SA+Real-CE batch: real LQ where flagged, synthetic elsewhere.
+                    flag = batch["has_real_lq"].to(accelerator.device).bool().view(-1, 1, 1, 1)
+                    real_lq = batch["lq"].to(accelerator.device, non_blocking=True)
+                    _, syn_lq = degradation.degrade_process(hq, resize_bak=True)
+                    lq = torch.where(flag, real_lq, syn_lq)
+                elif "lq" in batch:
+                    # All-real LQ (e.g. pure Real-CE 13mm) — skip synthetic degradation.
+                    lq = batch["lq"].to(accelerator.device, non_blocking=True)
+                else:
+                    _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
                 lq_image_m11 = lq
                 

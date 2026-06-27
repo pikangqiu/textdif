@@ -1,0 +1,125 @@
+train_dataset_config: configs/train_txt/realce_52mm_local_dataset.txt
+suffix: '_realce_2a_realpair_online'
+# Real-CE real-paired finetune (online-detection variant, local): load the
+# registered real 13mm LQ sharing the 52mm GT filename, replay the same crop,
+# skip synthetic degradation. Online DBNet detection (local has shapely).
+real_paired_lq_dir: /data/ywk/datasets/Real-CE/train/13mm
+
+test_lq_dir: /data/ywk/datasets/real_test/LQ
+test_gt_dir: /data/ywk/datasets/real_test/HR
+test_upscale: 4
+
+infer_steps: 1
+resolution: 512
+
+train_batch_size: 4
+gradient_accumulation_steps: 4
+dataloader_num_workers: 2
+dataloader_pin_memory: False
+dataloader_persistent_workers: False
+dataloader_prefetch_factor: 2
+
+patch_size: 2
+mlp_ratio: 4
+use_qknorm: True
+use_swiglu: True
+use_rope: True
+use_rmsnorm: True
+wo_shift: False
+
+dim: 1024
+depth: 28
+num_heads: 16
+use_8bit_adam: False
+
+ae_type: sd2
+ae_path: preset/ckpts/stable-diffusion-2-1-base
+lwdecoder_path: preset/ckpts/sd21_lwdecoder.pth
+
+learning_rate: 5.0e-6
+max_train_steps: 5000
+checkpoints_total_limit: 12
+checkpointing_steps: 500
+inference_steps: 1
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 1.0e-2
+adam_epsilon: 1.0e-08
+max_grad_norm: 1.0
+lr_scheduler: constant_with_warmup
+lr_warmup_steps: 0
+lr_num_cycles: 1
+
+use_ema: True
+mixed_precision: bf16
+tracker_project_name: vosr_realce_2a_online_finetune
+seed: 42
+ema_decay: 0.9999
+
+time_dist: ['uniform', 0, 1.0]
+
+cfg_ratio: 0.0
+cfg_scale: 0.5
+
+teacher_ckpt: exp_vosr_text/ldit_fm_bs008_sd2f8c4_size512_ps2_d1024_b28_h16_cfgs0.5-r0.1-wc0.05-0.25_edr3_tduni_typetxt_text_hr/checkpoints/checkpoint-00040000/clean_weights/ema_model.safetensors
+pretrained_ckpt: exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_ocr_local_gt/checkpoints/checkpoint-00020000/clean_weights/ema_model.safetensors
+
+weak_cond_strength_aelq: 0.1
+weak_cond_strength_aelq_list: [0.05, 0.25]
+cond_strength_aelq_list: [5, 1]
+
+dinov2_size: 448
+enc_type: dinov2b
+enc_dim: 768
+layer_dinov2b_list: [8]
+
+interp_type: lin
+
+u_weight: 0.0
+a: 1.0
+b: 1.0
+
+use_pos: False
+train_steps: 2
+encdim_ratio: 3
+t_start: 0
+t_end: 1
+resume_ckpt: ~
+distill_type: shortcut
+
+# Gradient-checkpoint the student DiT blocks. The OCR-REPA loss decodes the
+# one-step x0 prediction to a full 512px image (VAE decoder, grad retained for
+# backprop), which on top of the resident student graph OOMs a 24GB GPU at the
+# per-GPU micro-batch of 1. Checkpointing the DiT blocks frees that resident
+# activation memory to make room for the decode. Keeps full resolution.
+use_checkpoint: True
+
+# Local-crop OCR-REPA (experiment 2a): detect text boxes on the HR image, crop the
+# same boxes from the one-step prediction and HR, and align frozen recognizer
+# sequence features per region. Uses the vendored PaddleOCR2Pytorch (no HF download).
+ocr_repa_weight: 0.5
+ocr_repa_interval: 1
+ocr_repa_start_step: 0
+# Compute the OCR loss only on gradient-sync micro-steps (1 of every
+# gradient_accumulation_steps=4). This cuts the heavy decode+detect+recognize
+# work ~4x (main speedup) and, as a side effect, scales the effective OCR
+# gradient ~4x down, which keeps ocr_repa_weight=0.5 from over-dominating v_loss.
+ocr_repa_on_sync_only: True
+# Defaults resolve to PaddleOCR2Pytorch/weights/ch_ptocr_server_v2.0_{det,rec}_infer.pth.
+ocr_repa_rec_algorithm: CRNN
+ocr_repa_rec_image_shape: "3,32,320"
+# The decoded prediction is 512px; capping the detector at 512 avoids a wasteful
+# upscale to 960 with no loss of detection quality.
+ocr_repa_det_limit_side_len: 512
+ocr_repa_det_db_box_thresh: 0.6
+ocr_repa_max_boxes: 16
+ocr_repa_min_box_size: 8
+ocr_repa_loss_type: cosine
+
+logging_dir: logs
+output_dir: exp_vosr_realce_finetune/
+report_to: tensorboard
+log_loss_steps: 10
+
+dataset_type: 'txt'
+shuffle_buffer: 2000

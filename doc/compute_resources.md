@@ -2,7 +2,7 @@
 
 > 本文是本项目**全部计算资源**（服务器、GPU、数据与代码位置、登录方式、当前占用）的单一事实来源，供任意 AI / 协作者同步上下文。
 > **所有服务器均为多人共享**，下方「铁律」是硬约束，任何自动化操作前必须遵守。
-> 最后更新：2026-06-21。改动资源或迁移代码后请同步更新本文。
+> 最后更新：2026-06-24（加 §9 评测/推理命令+环境+代码检查；刷新 §5 占用；清理 doc 旧文档）。改动资源或迁移代码后请同步更新本文。
 
 ---
 
@@ -57,14 +57,15 @@
 
 ---
 
-## 5. 当前占用快照（2026-06-21）
+## 5. 当前占用快照（2026-06-24）
 
 | 机器 | 在跑 | 备注 |
 |---|---|---|
-| **199** | **E2 训练**（screen `e2_199`，GPU1-4，`train_e2_199.log`） | E1 OCR-cond + 2a-GT OCR-REPA 联合，eff-batch 16，20000 步，~7s/it ≈ 1.5 天。从本地分支移植 OCR-cond 训练接线（`train_vosr_distill.py`+`ocr_repa.py`）+ dinov2 改 `source='local'`。详见 §6。 |
-| **199** | **Real-CE 2a 微调**（screen `realce_2a`，**GPU1-4 与 E2 同卡共置**，`train_realce_2a.log`） | GT-box OCR-REPA（w=0.5）在 Real-CE 52mm HR 上微调，init=2a 学生 ckpt-20000，eff-batch 16（4 卡 local-1），5000 步。与 E2 同 4 卡共置（GPU4 峰值 66/80GB），算力共享两者各降。 |
-| **226.31** | **1.4B teacher 从零重训**（screen `ms_bs16`，GPU1-4，`train_ms_bs16_scratch.log`） | eff-batch 16 + 梯度检查点，~2.43s/it，ETA ~1.7 天到 100k。修复旧 teacher 欠拟合（loss 20k=0.059 vs 旧 0.176）。 |
-| **本地** | 评测 / 排队 | E2 原本在本机等四卡，已改到 199 跑。 |
+| **226.31** | **1.4B teacher（ms_from_pretrained）847 评测推理**（screen `teacher40k`，GPU1，`inference/teacher40k_847.log`） | 25 步 cfg0.5/wc0.1，ETA ~4h；自动链 `harvest_teacher40k.sh` 推理完→拉 199→协议① CharAcc，验证 from-pretrained 是否修好识别欠拟合（旧从头训 36.82）。 |
+| **199** | 空（gtsup 收割已完成） | GPU2 我方已释放；GPU0/1/3/4 多为他人作业，勿动。 |
+| **本地** | 空（Exp B + gtsup 收割均完成） | GPU0-3 空闲。 |
+
+> 已完结（详 `result_exp.md`）：Experiment B 结构增强×2a+2d（**结构增强未叠加**）；Real-CE 论文式监督微调 gtsup（**我们 Real-CE 微调最优 rec_acc 0.2991/PSNR 18.0，仍 < RRDB**）；1.4B teacher 训练 40000 干净收敛。
 
 ## 6. E2 在 199 的迁移要点（2026-06-21，可复用模板）
 
@@ -102,6 +103,73 @@
 - 本地→226.31 **未打通**：226.31 是 base main，要跑 OCR 实验需把 OCR hook 移植进其 `train_vosr_distill.py`（以其为基）+ 给 `SATextDataset` 加 GT-box + 传 PaddleOCR 权重。详见记忆 [[server-226-31-and-1p4b]]。
 - **dataloader 是最大分叉点**：本地/199 用 `realsr_dataset.TxtPairDataset`（HR 列表 + 在线 RealESRGAN 退化合成 LR + GT-box 随机裁剪映射）；226.31 用 `SATextDataset`（SA-Text parquet）。Real-CE 也走前者：52mm HR 列表 + 合成退化（非真实 13mm 配对）。
 - **建云端仓库建议**：以本地 `text-distill-ablation`（超集）为主干；把三台机的「路径差异」抽成 config/env 变量（数据根、ckpt 根、解释器、离线开关），避免硬编码绝对路径；离线补丁（HF offline、dinov2 local、GT-box-only 回退）保留为默认。
+
+---
+
+## 9. 评测 / 推理 / 测试管线（命令 + 环境 + 代码检查）★
+
+> **一句话铁律：`metric_*.py`（协议① PP-OCR+pyiqa）跑在 `osediff` 环境，不是 `vosr`！** 在 screen 里务必 `source /data/anaconda/bin/activate && conda activate osediff`，或用绝对路径解释器；用错环境会 `No module named 'paddleocr'` 立刻崩。
+
+### 9.1 各脚本 ↔ 环境 ↔ 依赖（用错即崩，先查这张表）
+
+| 脚本 | 作用 | **环境** | 关键依赖 | 机器 |
+|---|---|---|---|---|
+| `inference_vosr_onestep.py` | 一步学生推理（NFE=1） | **vosr** | torch/dinov2/SD2-VAE | 本地 / 199 |
+| `inference_vosr.py` | 多步 teacher 推理（如 25 步） | **vosr** | 同上 + Qwen-VAE(1.4B) | 226 / 199 |
+| `OSEDiff/metric_*.py` | **协议①** PP-OCR 识别 + pyiqa 画质 | **⚠️ osediff（非 vosr）** | **paddleocr**、pyiqa(LPIPS/MUSIQ/MANIQA) | **199** |
+| `scripts/eval_realce.py` | **Real-CE** 基准（RGB+mask PSNR/SSIM+中英 CRNN） | **vosr** | **cv2**、editdistance、pyiqa、CRNN | 本地 |
+| `realtext_eval/eval_spotting.py` | **协议②** TESTR 文本 spotting（det+E2E None） | **tair** | TESTR/detectron2、`PYTHONPATH=/data/ywk/TESTR` | 本地 |
+| `realtext_eval/rescore_lexicon.py` | 协议② Full lexicon 重打分（离线，无 GPU） | **tair** | — | 本地 |
+
+环境解释器：本地 `/home/ywk/anaconda3/envs/{vosr,tair}/bin/python`（**osediff 仅在 199**）；199 `conda activate {vosr,osediff}`；226 用绝对路径 `conda_envs/vosr/bin/python`。
+
+### 9.2 标准收割链（一个 ckpt → 双协议 + Real-CE）
+
+**(a) 一步学生推理**（vosr）。Real-Text 847：`-u 4 --infer_steps 1`；Real-CE（13mm→52mm 已配准）：`-u 1 --tile_size 512 --tile_overlap 64`。输出子目录恒为 `sd2_steps1_seed42_shortcut`。
+```bash
+python inference_vosr_onestep.py -c <CKPT_DIR> -i <LQ_dir> -o <OUT> \
+  -u 4 --infer_steps 1 --align_method nofix --force_rerun
+```
+
+**(b) 协议① PP-OCR + pyiqa（osediff @ 199）** —— 从模板派生（换 SR 目录串 + 输出名）：
+```bash
+source /data/anaconda/bin/activate && conda activate osediff
+cd /data2/wyw/ywk/OSEDiff
+sed -e 's/realctc_20000/<NAME>/g' -e 's/evaluation_results_detmap.txt/evaluation_results_<NAME>.txt/g' \
+    metric_realctc.py > metric_<NAME>.py        # SR 取 real_test/<NAME>/sd2_steps1_seed42_shortcut
+# 或 SR_PATH 直改版：sed 's#SR_PATH = .*#SR_PATH = "<abs_SR>/sd2_steps1_seed42_shortcut"#' metric_2a_online_ft.py > metric_X.py
+CUDA_VISIBLE_DEVICES=N python metric_<NAME>.py   # 出 PSNR/SSIM/LPIPS/MUSIQ/MANIQA/OCR-CER/OCR-CharAcc
+```
+
+**(c) 协议② TESTR（tair @ 本地）**：
+```bash
+cd /data/ywk/TAIR/realtext_eval
+PYTHONPATH=/data/ywk/TESTR CUDA_VISIBLE_DEVICES=N /home/ywk/anaconda3/envs/tair/bin/python eval_spotting.py \
+  --img_dir <SR>/sd2_steps1_seed42_shortcut --data_dir . \
+  --config /data/ywk/TESTR/configs/TESTR/TotalText/TESTR_R_50_Polygon.yaml \
+  --ckpt /data/ywk/TAIR-main/weights/totaltext_testr_R_50_polygon.pth --out_dir eval_out/<NAME>
+/home/ywk/anaconda3/envs/tair/bin/python rescore_lexicon.py --eval_dir eval_out/<NAME> --lexicon full
+# DETECTION_ONLY_RESULTS=det F1；E2E_RESULTS（None=几何/Full=lexicon 重打分）
+```
+
+**(d) Real-CE 基准（vosr @ 本地）**：
+```bash
+/home/ywk/anaconda3/envs/vosr/bin/python scripts/eval_realce.py \
+  --sr_dir <SR>/sd2_steps1_seed42_shortcut --out_json <out>.json   # psnr/ssim/mask_*/lpips/rec_acc/rec_ned
+```
+
+**(e) 多步 teacher 推理（1.4B，vosr @ 226）**：
+```bash
+/data07/dt_data/ywk/conda_envs/vosr/bin/python inference_vosr.py -c <TCKPT> -i <LQ> -o <OUT> \
+  -u 4 --infer_steps 25 --cfg_scale 0.5 --weak_cond_strength_aelq 0.1 --align_method nofix --force_rerun
+# 输出子目录 qwen_steps25_cfg0.5_wc0.1；评测仍走 (b)/(c)，需拉到 199/本地
+```
+
+### 9.3 高频坑（已踩，勿再犯）
+1. **screen 内 `conda activate` 静默回退 base**：`screen -dmS x bash -lc '... conda activate vosr; python ...'` 有时 activate 不生效 → `python`=base（缺 cv2/paddleocr）→ metric 崩。**根治：用绝对路径解释器**（`envs/vosr/bin/python`、`envs/tair/bin/python`），或在 osediff 用 `source /data/anaconda/bin/activate && conda activate osediff` 并验证 `which python`。
+2. **`metric_*.py` 用错环境**：默认想当然 vosr → 必崩（paddleocr 在 osediff）。见 §9.1。
+3. **rexec 跑长 until 轮询**会撞 paramiko 120s socket timeout；评测等待用本地后台 `run_in_background` 轮询远端 marker，别在单条 rexec 里 sleep 很久。
+4. **跨机搬产物无 226↔199 直连**：226 产物 → 本地中转 → 199；用 `rget_dt` 拉到本地再 `rput` 上 199。
 
 ---
 

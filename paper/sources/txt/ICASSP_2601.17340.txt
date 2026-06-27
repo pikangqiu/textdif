@@ -1,0 +1,526 @@
+TEXTS-DIFF: TEXTS-AWARE DIFFUSION MODEL FOR REAL-WORLD TEXT IMAGE
+SUPER-RESOLUTION
+Haodong He∗, Xin Zhan∗, Yancheng Bai‡, Rui Lan, Lei Sun, Xiangxiang Chu
+Amap, Alibaba Group
+ABSTRACT
+Real-world text image super-resolution aims to restore overall visual
+quality and text legibility in images suffering from diverse degrada-
+tions and text distortions. However, the scarcity of text image data
+in existing datasets results in poor performance on text regions. In
+addition, datasets consisting of isolated text samples limit the qual-
+ity of background reconstruction. To address these limitations, we
+construct Real-Texts, a large-scale, high-quality dataset collected
+from real-world images, which covers diverse scenarios and con-
+tains natural text instances in both Chinese and English. Addition-
+ally, we propose the TEXTS-Aware Diffusion Model (TEXTS-Diff)
+to achieve high-quality generation in both background and textual
+regions. This approach leverages abstract concepts to improve the
+understanding of textual elements within visual scenes and concrete
+text regions to enhance textual details. It mitigates distortions and
+hallucination artifacts commonly observed in text regions, while pre-
+serving high-quality visual scene fidelity. Extensive experiments
+demonstrate that our method achieves state-of-the-art performance
+across multiple evaluation metrics, exhibiting superior generaliza-
+tion ability and text restoration accuracy in complex scenarios. All
+the code, model, and dataset will be released.
+Index Terms—text image, super-resolution, diffusion model,
+text-awareness
+1. INTRODUCTION
+Real-world image super-resolution (Real-ISR) [1] aims to recon-
+struct high-resolution (HR) contents from low-resolution (LR) im-
+ages degraded by complex real-world factors. The derived task of
+real-world text image super-resolution (Real-TISR) encounters an
+even tougher scenario: it requires not only the reconstruction of
+global scene details to ensure visual coherence, but also the precise
+restoration of character structures in text regions. This necessitates
+that the model needs to simultaneously preserve the super-resolution
+(SR) quality of both background and text regions.
+However, existing SR benchmark datasets [2, 3] contain a rel-
+atively small number of images with textual content, and no corre-
+sponding text annotations are provided. Although some datasets [4,
+5, 6] provide annotated image-text pairs, limitations such as limited
+scale, isolated text, or monolingual composition constrain their prac-
+tical applicability. The absence of high-quality text image datasets
+for this task has limited the generalization of existing models, even
+though they exhibit remarkable performance in general image [7,
+8, 9]. They yield distorted glyphs, missing strokes, or hallucinated
+characters in the text super-resolution results, primarily due to the
+∗ Equal contribution
+‡ Project leader: Yancheng Bai
+Email: haodonghe@whu.edu.cn, xinzhan@hust.edu.cn,
+{yancheng.byc, lr264907, ally.sl, chuxiangxiang.cxx}@alibaba-inc.com
+Street ViewPrintFontPosterArtistic FontNaturalScenesCalligraphyFontIndoorScenesPrint Font
+Isolated TextsLimited ScenesSynthetic DataMonolingualTexts
+OtherDatasets
+OurDataset
+Fig. 1. Example images from other datasets and our Real-Texts
+dataset. Our dataset includes Chinese and English text across a wide
+range of scene types and font styles.
+minimal attention paid to textual regions. In addition, many ded-
+icated text SR methods [10, 11, 12] enhance only the legibility of
+cropped text patches while ignoring the surrounding background,
+leading to significant performance degradation when applied to LR
+images from complex natural scenes. Consequently, current mod-
+els struggle to effectively balance textual and background regions,
+which poses a significant challenge for real-world applications.
+To remedy these issues, we construct Real-Texts, a large-scale
+text image SR dataset. It contains more than 30,000 real-world im-
+ages with bilingual text (Chinese and English), covering a variety
+of font styles and diverse scene types. Meanwhile, to achieve high-
+quality generation in both background and textual regions, we draw
+inspiration from the global-to-local cognitive pattern in human read-
+ing, and propose TEXTS-Diff, a text-aware one-step diffusion model
+for the Real-TISR task. Specifically, we use the abstract concept of
+“TEXTS” as a semantic anchor within the primary visual features of
+LR images, guiding these visual cues to establish text-aware concep-
+tual representations. We then fuse these visual cues with high-level
+features from the text detection model to further enhance their per-
+ception of concrete text regions. Finally, conditioned on the guid-
+ance of these visual cues, the diffusion model performs one-step im-
+age SR, significantly improving text legibility, while maintaining the
+ability to super-resolve the entire image and achieve fast inference.
+Our contributions are: 1) We construct Real-Texts, a text SR
+image dataset. It contains more than 30,000 Chinese-English im-
+ages captured under diverse scenes and font styles. 2) We intro-
+duce TEXTS-Diff, which incorporates both abstract text concepts
+and concrete text regions into visual cues to guide the diffusion pro-
+cess, thereby enhancing the restoration of textual structures in im-
+ages. 3) Extensive experiments demonstrate that our approach sur-
+passes current methods on dedicated text image SR benchmarks and
+also delivers competitive performance on general SR datasets.
+arXiv:2601.17340v1  [cs.CV]  24 Jan 2026
+Dataset Text Bilingual Font Scene #Img Text line
+RealSR [13] × × × × 559 -
+TextZoom [4] ✓ × × × 1,059 21,740
+TextOCR [6] ✓ × ✓ ✓ 28,134 -
+Real-CE [5] ✓ ✓ × ✓ 2,718 33,789
+Real-Texts ✓ ✓ ✓ ✓ 34,875 136,136
+Table 1. Comparison between Real-Texts and other datasets.
+2. REAL-TEXTS DATASET
+Real-TISR task requires a dataset that includes images containing
+textual content together with their corresponding bounding boxes
+and text labels. As shown in Table 1, although general SR datasets
+such as RealSR [13], Flickr2K [2], and LSDIR [3] provide high-
+quality images, they contain a limited number of images with text
+and provide no associated annotations. TextZoom [4] annotates ex-
+isting SR datasets [13, 14], but its scale and diversity are somewhat
+limited. TextOCR [6] is a large-scale SR dataset (containing 903,069
+words). Although it has diverse font styles and scene types, it con-
+tains only English text, which limits its linguistic richness. In con-
+trast, Real-CE [5] contains images with both Chinese and English
+text, but its scale is limited. Recent work [15] synthesizes data by
+overlaying text onto images. It leads to a noticeable gap from natural
+images, because the pasted text is unrelated to the background. To
+address these limitations, we construct the Real-Texts dataset.
+2.1. Dataset Creation Process
+We collect a set of real-world images with varying resolutions. Then,
+we apply PPOCRv5 [16] for text detection and recognition, remov-
+ing any images without valid OCR results. Each retained image (a
+total of 72,476) is subsequently cropped into regions of 512 × 512
+pixels according to the detected text bounding boxes. In this way,
+a total of 74,035 cropped images are obtained. These cropped im-
+ages are then assessed with the VisualQuality-R1 model [17] to ob-
+tain quality scores. After automatically filtering the images by a
+preset threshold of 4.25, we further manually verified the results to
+ensure high quality. Finally, following the degradation pipeline of
+Real-ESRGAN [1], we generate the LR counterparts. Through these
+processes, 34,875 pairs of images are eventually obtained.
+2.2. Dataset Analysis
+Real-Texts contains 34,875 LR–HR image pairs with both Chinese
+and English text, covering various scenarios and font styles. As
+shown in Figure 1, the fonts encompass various styles, including
+printed, artistic, and calligraphic fonts, while the image scenes fea-
+ture diverse types such as street views (6,124), posters (5,910), in-
+door scenes (19,223), and natural scenes (3,618). The dataset con-
+tains a total of 136,136 textual instances, including 75,962 Chinese,
+37,971 English, and 3,476 mixed Chinese and English instances,
+while the remaining 18,727 correspond to texts or symbols from
+other languages. We assign 33,875 image pairs to the training dataset
+and the remaining 1,000 pairs to the test dataset.
+3. METHODOLOGY
+3.1. Overview Architecture
+Current general diffusion-based SR methods [18, 9, 19, 20] exhibit
+insufficient text awareness, resulting in poor text legibility. Addi-
+tionally, most of these methods rely on multi-step generation of HR
+images, which leads to slow inference. To address these limitations,
+CrossAttention
+CrossAttention
+LR image
+VAEEncoder
+U-Net
+VAEDecoder
+PromptExtractor
+FeatureExtractor
+TextDetectionModel
+TextEncoder
+ODMCanny
+“TEXTS”
+SR image
+MaskHR imageℒ!"#!
+ℒ"$%%ℒ&'(')
+ℒ*"+
+FeatureExtractor
++
+Conv+ReLUConv+ReLUConv+ReLUConvReLUConv+ReLUConvSigmoidAvg Pool×
+ConcretePerception
+AbstractPerception𝐹,-.,
+𝐹/0
+𝐹,12
+𝐹345
+𝐹67869
+LoRATraining
+Full Parameter Training
+Frozen
+Fig. 2. Overview of TEXTS-Diff. The framework captures text-
+aware visual cues to guide the diffusion process through abstract and
+concrete perception processes.
+we propose TEXTS-Diff, a one-step diffusion model for Real-TISR.
+Its overall architecture is illustrated in Figure 2. Inspired by the
+global-to-local cognitive pattern in human reading, TEXTS-Diff in-
+corporates both abstract text concepts and concrete text regions into
+visual cues, which are then used as conditions to guide the model’s
+diffusion process.
+3.2. TEXTS-Aware Guidance
+Advanced diffusion-based SR models [21, 18] enhance computa-
+tional efficiency by performing the diffusion process in the latent
+space of noisy LR images. Nevertheless, the V AE used for latent
+encoding attenuates high-frequency visual details, which are indis-
+pensable for accurate reconstruction of HR images. This loss of in-
+formation often yields over-smoothed SR outputs, thus degrading
+the sharpness and continuity of text structures. To address this issue,
+we propose Feature Extractor (FE) module (see the bottom-right of
+Figure 2) to obtain primary visual cues and compensate for informa-
+tion loss. Specifically,FEprogressively extracts features through
+stacked convolutional layers and residual blocks. Given an LR im-
+ageI lr ∈R H×W×3 , the module produces visual features with high-
+frequency components better preserved, denoted asF lr:
+Flr =FE(I lr), F lr ∈R h×w×c,(1)
+whereH×Wdenotes the spatial resolution of the LR image,h×
+wrefers to the spatial resolution of the LR latent features after8×
+downsampling, andcis the channel dimension.
+To enable the visual features to form an abstract conceptual un-
+derstanding of text, we establish a process of textual abstraction per-
+ception by applying cross-attention between the visual featuresF lr
+and the “TEXTS” textual featuresFtext. The abstract perception pro-
+cess can be expressed as:
+Ftext =CLIP( ′′TEXTS′′),
+Qlr =W lr
+q ·F lr, K a =W a
+k ·F text, V a =W a
+v ·F text,
+Fabs =softmax
+Qlr ·K T
+a√
+d
+
+·V a,
+(2)
+whereCLIPrefers to the text encoder [22], andW lr
+q ,W a
+k , andW a
+v
+are learnable linear projection matrices.Q lr,K a, andV a denote the
+query, key, and value matrices, respectively.dindicates the feature
+dimension, whereasF abs represents the visual feature enhanced by
+abstract text concepts. In order to enhance the perception ofFabs with
+respect to concrete text regions, we construct a concrete perception
+process by applying cross-attention betweenF abs and the high-level
+visual featuresF tdm extracted from the original LR image by the text
+detection model (T DM). The process can be defined as:
+Ftdm =T DM(Ilr),
+Qabs =W abs
+q ·F abs, K c =W c
+k ·F tdm, V c =W c
+v ·F tdm,
+FTEXTS =softmax
+Qabs ·K T
+c√
+d
+
+·V c,
+(3)
+whereT DMdenotes DBNet++ [23], andW abs
+q ,W c
+k , andW c
+v
+are learnable linear matrices.Q abs,K c, andV c denote the query,
+key, and value matrices, respectively. Through these interaction pro-
+cesses from abstract to concrete, we obtain text-aware enhanced vi-
+sual featuresF TEXTS to guide SR.
+3.3. Diffusion Processing
+We employ a pretrained Stable Diffusion (SD) model as the prior.
+For practical SR applications, we follow the one-step diffusion tech-
+nique of OSEDiff [26] by directly transition from the LR image dis-
+tribution to the HR image distribution in one step. To accommo-
+date this modification, the SD U-Net is fine-tuned using LoRA [27].
+To guide the diffusion process, two conditional features are injected
+into the U-Net: the text-aware featureF TEXTS, and the semantic vi-
+sual featureF p extracted from the LR image by a pretrained Prompt
+Extractor (PE) [18]. Specifically,F p is fed into the original Trans-
+former blocks, whereasF TEXTS is supplied to newly added trainable
+Transformer blocks inserted after each down block and the middle
+block of the U-Net. Under this guidance, the U-Net refines the latent
+featureF v produced by the V AE Encoder and reconstructs the SR
+imageI sr through the V AE Decoder. It can be described as:
+Fv =Encoder(I lr), F p =PE(I lr),
+Isr =Decoder(U-Net(F TEXTS, Fp, Fv)). (4)
+3.4. Loss Function
+To train our SR framework, we impose an L2-norm loss between the
+ground truth HR imagesI hr and the SR predictionsI sr to steer the
+diffusion process. In addition, we incorporate an LPIPS [28] per-
+ceptual loss on HR-SR image pairs to encourage the reconstructed
+images to be perceptually closer to the ground truth. These losses
+are formulated as follows:
+Ldiff =∥I sr −I hr∥2,L LPIPS =LPIPS(I sr, Ihr).(5)
+To enhance text reconstruction in SR images, we use the Canny
+edge detector to extract edges from SR and HR images, and apply
+an L2-based edge lossL edge for text regions. The OCR-Text Destyl-
+ization Modeling method (ODM) [29] is also used to defineL odm,
+improving the model’s sensitivity to textual differences. The losses
+are formulated as follows:
+Ledge =∥(Canny(I sr)−Canny(I hr))◦I mask∥2,
+Lodm =∥(ODM(I sr)− ODM(Ihr))◦I mask)∥2, (6)
+where◦denotes the pixel-wise multiplication, andI mask is the bi-
+narized ground truth mask based on text line annotations of the HR
+image. The total loss is formulated as a weighted combination of the
+above components usingλ 1-λ4 to balance different aspects of the
+reconstruction:
+Ltotal =λ 1Ldiff +λ 2LLPIPS +λ 3Ledge +λ 4Lodm,(7)
+whereλ 1-λ4 are set to 1, 2, 1, and 10, respectively.
+Real-ESRGAN
+Ours
+LR
+ OSEDiff
+DiffBIR
+GT
+ FaithDiff
+SUPIR
+SeeSR
+StableSR
+Fig. 3. Visual comparison on the Real-Texts test dataset. The red
+box means the poor result areas.
+4. EXPERIMENTS
+4.1. Experimental Settings
+4.1.1. Dataset and Details
+The training dataset composition is as follows: 33,875 images with
+text annotations from the Real-Texts, 14,312 cropped images with
+text annotations from the Real-CE training set [5], and 20,000 im-
+ages without text annotations from the LSDIR dataset [3]. We apply
+the widely used Real-ESRGAN [1] for degradations. We evaluate
+model performance on the test sets of Real-CE and Real-Texts. For
+implementation details, we utilize the pretrained SD2.1 model [22]
+as the backbone. During training, the V AE encoder and decoder are
+frozen, and the U-Net is fine-tuned via LoRA [27].
+4.1.2. Evaluation Metrics
+We use OCR accuracy (OCR-A) to evaluate the effectiveness of text
+SR. Specifically, we evaluate the SR images with text annotations by
+cropping them based on the ground-truth (GT) text bounding boxes.
+Subsequently, we compare the text recognition results obtained from
+the PPOCRv5 [16] with the GT text. To ensure reliability, we manu-
+ally verify 100 random samples and confirm a text content accuracy
+of 94.2%. Completely identical text lines are counted as correct,
+whereas mismatched lines are considered errors. In addition, we
+use reference-based metrics such as PSNR, SSIM [30], LPIPS [28],
+DISTS [31], and FID [32], as well as no-reference metrics such as
+NIQE [33], MANIQA [34], MUSIQ [35], and CLIPIQA [36] to eval-
+uate the model’s SR performance.
+4.2. Experimental Results
+4.2.1. Quantitative Comparison
+As shown in Table 2, our model achieves state-of-the-art (SOTA)
+performance on the two annotated datasets (Real-Texts and Real-
+CE) for text region SR, as measured by OCR-A. Our model’s OCR-
+A surpasses that of the second-best model by 3.67% and 17.60% on
+Real-Texts and Real-CE, respectively. By comprehensively analyz-
+ing both reference-based and non-reference metrics, we achieve the
+highest total number of best and second-best results on Real-Texts
+and Real-CE. In addition, the result of RealSR dataset demonstrates
+that our approach restores text regions without compromising overall
+image SR quality.
+Datasets Methods OCR-A↑ PSNR↑SSIM↑LPIPS↓DISTS↓FID↓NIQE↓MANIQA↑MUSIQ↑CLIPIQA↑
+Real-CE
+Real-ESRGAN [1] 0.3829 19.10 0.6529 0.3962 0.2460 54.66 5.3908 0.4250 56.56 0.6421
+StableSR [21] (4 steps) 0.3938 19.28 0.6876 0.3472 0.1866 50.04 4.9530 0.4748 49.74 0.5247
+DiffBIR [19] (50 steps) 0.3697 19.96 0.6711 0.3585 0.2251 49.25 5.1390 0.4990 56.29 0.5935
+FaithDiff [20] (20 steps) 0.3691 19.54 0.6569 0.3337 0.172642.95 4.1747 0.618964.28 0.6619
+SeeSR [18] (50 steps) 0.3846 19.86 0.7078 0.3254 0.2163 48.34 4.6469 0.577064.98 0.6884
+SUPIR [24] (50 steps) 0.3590 20.00 0.6584 0.3537 0.1852 44.52 4.6995 0.5344 51.19 0.5525
+OSEDiff [25] (1 step) 0.3758 19.47 0.7097 0.3123 0.1645 49.71 5.2332 0.5933 63.38 0.6439
+TEXTS-Diff(1 step) 0.4631 20.31 0.7235 0.2791 0.141444.36 5.4176 0.5590 56.10 0.5439
+Real-Texts
+Real-ESRGAN [1] 0.3764 22.91 0.7265 0.2794 0.1878 50.12 6.5263 0.5645 67.99 0.6009
+StableSR [21] (4 steps) 0.3511 23.69 0.7481 0.2396 0.1502 36.23 4.8865 0.5867 57.08 0.4707
+DiffBIR [19] (50 steps) 0.3538 22.63 0.6712 0.2709 0.1632 41.76 4.9049 0.6744 72.33 0.6501
+FaithDiff [20] (20 steps) 0.3412 22.82 0.6979 0.2188 0.1448 34.214.3931 0.694271.43 0.6313
+SeeSR [18] (50 steps) 0.3229 23.09 0.7151 0.2347 0.1750 41.88 5.0474 0.674272.69 0.6882
+SUPIR [24] (50 steps) 0.3811 23.23 0.6960 0.2453 0.1454 31.73 4.9894 0.6579 68.94 0.6409
+OSEDiff [25] (1 step) 0.3049 22.91 0.7160 0.2291 0.1476 38.21 4.6753 0.6600 70.12 0.6171
+TEXTS-Diff(1 step) 0.3951 24.49 0.7499 0.1801 0.1174 27.704.5296 0.6482 66.18 0.5258
+RealSR
+Real-ESRGAN [1] - 25.69 0.76160.2727 0.2063 135.18 5.8295 0.5487 60.18 0.4449
+StableSR [21] (4 steps) - 24.70 0.7085 0.3018 0.2135 128.51 5.9122 0.6221 65.78 0.6178
+DiffBIR [19] (50 steps) - 24.77 0.6572 0.3658 0.2310 128.99 5.5696 0.6253 64.85 0.6386
+FaithDiff [20] (20 steps) - 25.32 0.7091 0.2807 0.1922 108.68 4.9688 0.663567.37 0.5942
+SeeSR [18] (50 steps) - 25.18 0.7216 0.3009 0.2223 125.55 5.4081 0.6442 69.770.6612
+SUPIR [24] (50 steps) - 25.16 0.6945 0.3336 0.2102 124.00 5.2011 0.5714 56.94 0.5206
+OSEDiff [25] (1 step) - 25.15 0.7341 0.2921 0.2128 123.49 5.6476 0.6326 69.09 0.6693
+TEXTS-Diff(1 step) - 26.510.7602 0.2485 0.1842109.11 5.5610 0.6154 64.82 0.6042
+Table 2. Quantitative comparison with state-of-the-art methods on the benchmarks. The best and second-best results of each metric are
+highlighted in bold and underline, respectively.
+OursLR OSEDiffGT FaithDiff
+Real-ESRGAN DiffBIRSUPIRSeeSRStableSR
+“West Entrance”“West Eatrance”“West Entrance”“West Entrance”
+“WentEntranco”“Wont Entronce”“WeatEatrance”“West Eauamco”“WestEetrance”
+“WestEntrance”
+Fig. 4. Visual comparison on the Real-CE validation dataset. The
+enlarged part of the dashed red box is shown under the original re-
+sults. Their corresponding OCR recognition results in the aforemen-
+tioned figure, where erroneous text is highlighted in red and omitted
+text is marked in blue.
+4.2.2. Qualitative Comparison
+As shown in the comparison results in Figures 3 and 4, our model
+consistently outperforms other baseline methods in restoring text re-
+gions. Specifically, our SR results significantly improve text legibil-
+ity for both Chinese and English texts, while avoiding deformation
+and distortion. Moreover, the model maintains strong performance
+on non-text regions, effectively preserving overall image quality.
+These results demonstrate the effectiveness of our model, indicating
+its potential for practical applications in text image restoration.
+Metrics Ours w/o TDM w/o TEXTS w/o Both
+OCR-A↑ 0.39510.3764 0.3829 0.3715
+PSNR↑ 24.49 24.46 24.4424.52
+SSIM↑ 0.7499 0.7487 0.74800.7503
+LPIPS↓ 0.18010.1807 0.1827 0.1826
+DISTS↓ 0.11740.1179 0.1192 0.1180
+FID↓ 27.7027.77 28.08 27.88
+NIQE↓ 4.5296 4.51594.6032 4.6619
+MANIQA↑ 0.6482 0.6514 0.65210.6443
+MUSIQ↑ 66.18 66.71 67.2766.44
+CLIPIQA↑ 0.5258 0.5358 0.54210.5282
+Table 3. Ablation study on Real-Texts.
+4.2.3. Ablation Study
+We conduct experiments on the Real-Texts dataset to evaluate the ef-
+fectiveness of the “TEXTS” concept and TDM features. The results
+in Table 3 show that incorporating both abstract and concrete percep-
+tions of text in visual cues can significantly enhance text perception
+and restoration, while minimally affecting fidelity (PSNR -0.03 dB)
+and perceptual quality (NIQE +0.0137).
+5. CONCLUSION
+To address the challenges faced in the real-world text image super-
+resolution task, we propose Real-Texts, a large-scale, high-quality
+super-resolution dataset collected from real-world images. In ad-
+dition, we present TEXTS-Diff, which introduces abstract text con-
+cepts and concrete text regions into visual guidance cues and enables
+one-step generation. This design significantly enhances text super-
+resolution performance while maintaining its capability to super-
+resolve image backgrounds.
+6. REFERENCES
+[1] Xintao Wang, Liangbin Xie, Dong, et al., “Real-esrgan: Train-
+ing real-world blind super-resolution with pure synthetic data,”
+inIEEE ICCV, 2021, pp. 1905–1914.
+[2] Bee Lim, Sanghyun Son, Heewon Kim, et al., “Enhanced deep
+residual networks for single image super-resolution,” inIEEE
+CVPR Workshops, July 2017.
+[3] Yawei Li, Kai Zhang, Liang, et al., “Lsdir: A large scale
+dataset for image restoration,” inIEEE CVPR, 2023, pp. 1775–
+1787.
+[4] Wenjia Wang, Enze Xie, et al., “Scene text image super-
+resolution in the wild,” inECCV. Springer, 2020, pp. 650–666.
+[5] Jianqi Ma, Zhetong Liang, Wangmeng Xiang, et al., “A bench-
+mark for chinese-english scene text image super-resolution,” in
+IEEE ICCV, 2023, pp. 19452–19461.
+[6] Amanpreet Singh, Guan Pang, Mandy Toh, et al., “Textocr:
+Towards large-scale end-to-end reasoning for arbitrary-shaped
+scene text,” inIEEE CVPR, 2021, pp. 8802–8812.
+[7] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, et al., “Ex-
+ploiting diffusion prior for real-world image super-resolution,”
+IJCV, vol. 132, no. 12, pp. 5929–5949, 2024.
+[8] Tao Yang, Rongyuan Wu, Peiran Ren, et al., “Pixel-aware sta-
+ble diffusion for realistic image super-resolution and personal-
+ized stylization,” inECCV. Springer, 2024, pp. 74–91.
+[9] Fanghua Yu, Jinjin Gu, Zheyuan Li, et al., “Scaling up to ex-
+cellence: Practicing model scaling for photo-realistic image
+restoration in the wild,” inIEEE CVPR, 2024, pp. 25669–
+25680.
+[10] Jingye Chen, Bin Li, and Xiangyang Xue, “Scene text tele-
+scope: Text-focused scene image super-resolution,” inIEEE
+CVPR, 2021, pp. 12026–12035.
+[11] Yuzhe Zhang, Jiawei Zhang, Hao Li, et al., “Diffusion-based
+blind text image super-resolution,” inIEEE CVPR, 2024, pp.
+25827–25836.
+[12] Shipeng Zhu, Zuoyan Zhao, Pengfei Fang, et al., “Improv-
+ing scene text image super-resolution via dual prior modulation
+network,” inAAAI, 2023, vol. 37, pp. 3843–3851.
+[13] Jianrui Cai, Hui Zeng, Hongwei Yong, et al., “Toward real-
+world single image super-resolution: A new benchmark and a
+new model,” inIEEE ICCV, 2019, pp. 3086–3095.
+[14] Xuaner Zhang, Qifeng Chen, Ren Ng, et al., “Zoom to learn,
+learn to zoom,” inIEEE CVPR, 2019, pp. 3762–3770.
+[15] Qiming Hu, Linlong Fan, Yiyan Luo, et al., “Text-aware real-
+world image super-resolution via diffusion model with joint
+segmentation decoders,”arXiv preprint arXiv:2506.04641,
+2025.
+[16] Cheng Cui, Ting Sun, Manhui Lin, et al., “Paddleocr 3.0 tech-
+nical report,” 2025.
+[17] Tianhe Wu, Jian Zou, Jie Liang, et al., “Visualquality-r1:
+Reasoning-induced image quality assessment via reinforce-
+ment learning to rank,”arXiv preprint arXiv:2505.14460,
+2025.
+[18] Rongyuan Wu, Tao Yang, Lingchen Sun, et al., “Seesr: To-
+wards semantics-aware real-world image super-resolution,” in
+IEEE CVPR, 2024, pp. 25456–25467.
+[19] Xinqi Lin, Jingwen He, Ziyan Chen, et al., “Diffbir: Toward
+blind image restoration with generative diffusion prior,” in
+ECCV. Springer, 2024, pp. 430–448.
+[20] Junyang Chen, Jinshan Pan, and Jiangxin Dong, “Faithd-
+iff: Unleashing diffusion priors for faithful image super-
+resolution,” inIEEE CVPR, 2025, pp. 28188–28197.
+[21] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, et al., “Ex-
+ploiting diffusion prior for real-world image super-resolution,”
+IJCV, vol. 132, no. 12, pp. 5929–5949, 2024.
+[22] Robin Rombach, Andreas Blattmann, Dominik Lorenz, et al.,
+“High-resolution image synthesis with latent diffusion mod-
+els,” inIEEE CVPR, 2022, pp. 10684–10695.
+[23] Minghui Liao, Zhisheng Zou, Zhaoyi Wan, et al., “Real-time
+scene text detection with differentiable binarization and adap-
+tive scale fusion,”IEEE TPAMI, vol. 45, no. 1, pp. 919–931,
+2022.
+[24] Fanghua Yu, Jinjin Gu, Zheyuan Li, et al., “Scaling up to ex-
+cellence: Practicing model scaling for photo-realistic image
+restoration in the wild,” inIEEE CVPR, 2024, pp. 25669–
+25680.
+[25] Rongyuan Wu, Lingchen Sun, Zhiyuan Ma, et al., “One-
+step effective diffusion network for real-world image super-
+resolution,”NeurIPS, vol. 37, pp. 92529–92553, 2024.
+[26] Kangfu Mei, Hossein Talebi, Mojtaba Ardakani, et al., “The
+power of context: How multimodality improves image super-
+resolution,”arXiv preprint arXiv:2503.14503, 2025.
+[27] Edward J Hu, Yelong Shen, Phillip Wallis, et al., “Lora: Low-
+rank adaptation of large language models,”arXiv preprint
+arXiv:2106.09685, 2021.
+[28] Richard Zhang, Phillip Isola, Alexei A Efros, et al., “The un-
+reasonable effectiveness of deep features as a perceptual met-
+ric,” inIEEE CVPR, 2018, pp. 586–595.
+[29] Chen Duan, Pei Fu, Shan Guo, et al., “Odm: A text-image fur-
+ther alignment pre-training approach for scene text detection
+and spotting,” inIEEE CVPR, 2024, pp. 15587–15597.
+[30] Zhou Wang, Alan C Bovik, Hamid R Sheikh, et al., “Image
+quality assessment: from error visibility to structural similar-
+ity,”IEEE TIP, vol. 13, no. 4, pp. 600–612, 2004.
+[31] Keyan Ding, Kede Ma, Shiqi Wang, et al., “Image quality
+assessment: Unifying structure and texture similarity,”IEEE
+TPAMI, vol. 44, no. 5, pp. 2567–2581, 2020.
+[32] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, et al.,
+“Gans trained by a two time-scale update rule converge to a
+local nash equilibrium,”NeurIPS, vol. 30, 2017.
+[33] Lin Zhang, Lei Zhang, and Alan C Bovik, “A feature-enriched
+completely blind image quality evaluator,”IEEE TIP, vol. 24,
+no. 8, pp. 2579–2591, 2015.
+[34] Sidi Yang, Tianhe Wu, Shuwei Shi, et al., “Maniqa: Multi-
+dimension attention network for no-reference image quality as-
+sessment,” inIEEE CVPR, 2022, pp. 1191–1200.
+[35] Junjie Ke, Qifei Wang, Yilin Wang, et al., “Musiq: Multi-scale
+image quality transformer,” inIEEE ICCV, 2021, pp. 5148–
+5157.
+[36] Jianyi Wang, Kelvin CK Chan, and Chen Change Loy, “Ex-
+ploring clip for assessing the look and feel of images,” inAAAI,
+2023, vol. 37, pp. 2555–2563.

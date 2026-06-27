@@ -1,0 +1,2 @@
+configs/train_txt/text_hr_512_images.txt, 1
+/data/ywk/datasets/Real-CE/curation/realce_tiles/realce_tiles_hr_list.txt, 25

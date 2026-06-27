@@ -1,0 +1,1367 @@
+TSD-SR: One-Step Diffusion with Target Score Distillation for Real-World
+Image Super-Resolution
+Linwei Dong1,2* Qingnan Fan2* Yihong Guo1 Zhonghao Wang3
+Qi Zhang2 Jinwei Chen2 Yawei Luo1† Changqing Zou1,4
+1Zhejiang University 2Vivo Mobile Communication Co. Ltd
+3University of Chinese Academy of Sciences 4Zhejiang Lab
+Abstract
+Pre-trained text-to-image diffusion models are increasingly
+applied to real-world image super-resolution (Real-ISR)
+tasks. Given the iterative refinement nature of diffusion
+models, most existing approaches are computationally ex-
+pensive. While methods such as SinSR and OSEDiff have
+emerged to condense inference steps via distillation, their
+performance in image restoration or details recovery is not
+satisfactory. To address this, we propose TSD-SR, a novel
+distillation framework specifically designed for real-world
+image super-resolution, aiming to construct an efficient and
+effective one-step model. We first introduce the Target Score
+Distillation, which leverages the priors of diffusion mod-
+els and real image references to achieve more realistic im-
+age restoration. Secondly, we propose a Distribution-Aware
+Sampling Module to make detail-oriented gradients more
+readily accessible, addressing the challenge of recovering
+fine details. Extensive experiments demonstrate that our
+TSD-SR has superior restoration results (most of the met-
+rics perform the best) and the fastest inference speed (e.g.
+40 times faster than SeeSR) compared to the past Real-ISR
+approaches based on pre-trained diffusion priors. Our code
+is released at https://github.com/Microtreei/TSD-SR.
+1. Introduction
+Image super-resolution (ISR) [8, 9, 23, 26] aims to trans-
+form low-quality (LQ) images, which have been degraded
+by noise or blur, into clear high-quality (HQ) images.
+Unlike traditional ISR methods [6, 67], which assume
+a known degradation process, real-world image super-
+resolution (Real-ISR) [47, 63] focuses on enhancing images
+affected by complex and unknown degradations, thereby of-
+fering greater practical utility.
+*Equal contribution. †Corresponding authors.
+Figure 1. Performance and efficiency comparison among Real-
+ISR methods. TSD-SR stands out for achieving high-quality
+restoration with the fastest speed among diffusion-based models.
+In contrast, existing models prioritize either speed or restoration
+performance. The performance of each method is benchmarked
+on an A100 GPU with the DRealSR dataset.
+Generative models, particularly Generative Adversarial
+Networks (GANs) [11, 33, 37] and Diffusion Models (DMs)
+[17, 40, 42], have demonstrated remarkable capabilities in
+tackling Real-ISR tasks. GAN-based methods utilize ad-
+versarial training by alternately optimizing a generator and
+a discriminator to produce realistic images. While GANs
+support one-step inference, they are often hindered by chal-
+lenges such as mode collapse and training instability [2].
+Recently, Diffusion Models (DMs) have demonstrated im-
+pressive performance in image generation [21, 48]. Their
+strong priors enable them to produce more realistic im-
+ages with richer details compared to GAN-based methods
+[40, 42]. Some researchers [29, 54, 57, 61] have success-
+fully leveraged pre-trained DMs for Real-ISR tasks. How-
+ever, due to the iterative denoising nature of diffusion mod-
+els [17], the Real-ISR process is computationally expensive.
+1
+arXiv:2411.18263v4  [cs.CV]  31 May 2025
+To achieve an efficient and one-step network akin to
+GANs, several pioneering methods that condense the it-
+erations of diffusion models through distillation [12, 15,
+18, 58] have been proposed [49, 53, 55]. Among these
+works, OSEDiff [53] introduced the Variational Score Dis-
+tillation (VSD) loss [51] to Real-ISR tasks, achieving state-
+of-the-art (SOTA) one-step performance by leveraging prior
+knowledge from pre-trained models. Despite these ad-
+vancements, our investigation has revealed two critical lim-
+itations associated with VSD in Real-ISR applications. (1)
+Unreliable gradient direction. VSD relies on a Teacher
+Model to provide a “true gradient direction.” However, this
+guidance is proven unreliable in scenarios where initial ISR
+outputs are suboptimal. (2) Insufficient detail recovery.
+The VSD loss exhibits notable variation across different
+timesteps, and the uniform sampling strategy for t poses
+challenges in aligning the score function with detailed tex-
+ture recovery requirements. These findings underscore the
+need for more effective approaches to address these issues.
+In this paper, we propose a novel method called TSD-
+SR to distill a multi-step Text-to-Image (T2I) DMs [10,
+38, 40] into an effective one-step diffusion model tai-
+lored for the Real-ISR task. Specifically, TSD-SR con-
+sists of two components: Target Score Distillation (TSD)
+and Distribution-Aware Sampling Module (DASM). TSD
+incorporates our newly proposed Target Score Matching
+(TSM) loss to compensate for the limitations of the VSD
+loss. This significant score loss leverages HQ data to pro-
+vide a reliable optimization trajectory during distillation, ef-
+fectively reducing visual artifacts caused by deviant predic-
+tions from the Teacher Model. DASM is designed to en-
+hance detail recovery by strategically sampling low-noise
+samples that are distribution-based during training. This
+approach effectively allocates more optimization to early
+timesteps within a single iteration, thereby improving the
+recovery of fine details.
+Experiments on popular benchmarks demonstrate that
+TSD-SR achieves superior restoration performance (most of
+the metrics perform the best) and high efficiency (the fastest
+inference speed, 40 times faster than SeeSR) compared to
+the state-of-the-art Real-ISR methods based on pre-trained
+DMs, while requiring only a single inference step, as shown
+in (Fig. 1).
+Our main contribution can be summarized as threefold:
+• We propose a novel method called TSD-SR to achieve
+one-step DMs distillation for the Real-ISR task.
+• We introduce Target Score Distillation (TSD) to provide
+reliable gradients that enhance the realism of outputs from
+Real-ISR methods.
+• We design a Distribution-Aware Sampling Module
+(DASM) specifically tailored to enhance the capability of
+detail restoration.
+2. Related Work
+GAN-based Real-ISR. Since SRGAN [26] first applied
+GAN to ISR, it has effectively enhanced visual quality
+by combining adversarial loss with perceptual loss [7,
+66]. Subsequently, ESRGAN [46] introduced Residual-in-
+Residual Dense Block and a relativistic average discrimina-
+tor, further improving detail restoration. Methods like BSR-
+GAN [63] and Real-ESRGAN [47] simulate complex real-
+world degradation processes, achieving ISR under unknown
+degradation conditions, which enhances the model’s gener-
+alization ability. Although GAN-based methods are capable
+of adding more realistic details to images, they suffer from
+training instability and mode collapse [2].
+Multi-step Diffusion-based Real-ISR. Some researches
+[29, 45, 54, 57, 61] in recent years have utilized the
+powerful image priors in pre-trained T2I diffusion models
+[35, 40, 65] for Real-SR tasks and achieved promising re-
+sults. For example, StableSR [45] balances fidelity and per-
+ceptual quality by fine-tuning the time-aware encoder and
+employing controllable feature wrapping. DiffBiR [29] first
+processes the LR image through a reconstruction network
+and then uses the Stable Diffusion (SD) model [40] to sup-
+plement the details. SeeSR [54] attempts to better stimu-
+late the generative power of the SD model by extracting the
+semantic information in the image as a conditional guide.
+PASD [57] introduces a pixel-aware cross attention module
+to enable the diffusion model to perceive the local struc-
+ture of the image at the pixel level, while using a degrada-
+tion removal module to extract degradation insensitive fea-
+tures to guide the diffusion process along with high-level
+information from the image. SUPIR [61] achieves a gener-
+ative and fidelity capability using negative cues [16] as well
+as restoration-guided sampling, while using a larger pre-
+training model with a larger dataset to enhance the model
+capability. However, all of these methods are limited by the
+multi-step denoising of the diffusion model, which requires
+20-50 iterations in inference, resulting in an inference time
+that lags far behind that of GAN-based methods.
+One-step Diffusion-based Real-ISR. Recently, there has
+been a surge of interest within the academic community
+in one-step distillation techniques [31, 34, 41, 59, 60] for
+diffusion-based Real-ISR task. SinSR [49] leverages con-
+sistency preserving distillation to condense the inference
+steps of ResShift [62] into a single step, yet the general-
+ization of ResShift and SinSR is constrained due to the ab-
+sence of large-scale data training. AddSR [55] introduces
+the adversarial diffusion distillation (ADD) [41] to Real-
+ISR tasks, resulting in a comparatively effective four-step
+model. However, this method has a propensity to produce
+excessive and unnatural image details. OSEDiff [53] di-
+rectly uses LQ images as the beginning of the diffusion pro-
+cess, and employs VSD loss [51] as a regularization tech-
+nique to condense a multi-step pre-trained T2I model into a
+2
+LoRA Model
+Teacher Model
+Variance Score
+Target Score
+Target Distribution Gradient
+Target Score Distillation
+update
+DASM
+share weights
+Teacher Model
+Gradient Flow
+Trainable
+Frozen
+Student Model
+Encoder
+Encoder DASM
+Decoder
+Figure 2. Pipeline overview. We train a one-step Student Model Gθ to transform the low-quality image xL into a more realistic one. The
+noisy latent ˆzt sampled by DASM (Details can be found in Fig. 6.) will be fed into both the pre-trained Teacher and the LoRA Model
+to produce the Variational Score Loss. Subsequently, the Teacher’s predictions on ˆzt and zt yield the Target Score Loss. Their weighted
+forms, namely TSD (red flow), along with the pixel-space reconstruction loss (green flow), are leveraged to update the Student Model Gθ
+. After updating the Student Model, we employ the diffusion loss (blue flow) to update the LoRA Model.
+one-step Real-ISR model. However, due to the incorpora-
+tion of alternating training strategies, OSEDiff may initially
+tend towards unreliable optimization directions, which may
+lead to visual artifacts.
+3. Methodology
+3.1. Preliminaries
+Problem Formulation. The ISR problem aims to recon-
+struct a HQ image xH from an LQ input xL by train-
+ing a parameterized ISR model Gθ on a dataset D =
+{(xL, xH)N
+i=1}, where N represents the number of image
+pairs. Formally, this problem can be formulated as mini-
+mizing the following objective:
+θ∗ = arg min
+θ
+E(xL,xH)∼D[LRec(Gθ(xL), xH)
++λLReg(qθ(ˆxH), p(xH))]
+(1)
+Here, LRec denotes the reconstruction loss, commonly mea-
+sured by distance metrics such as L2 or LP IP S[66]. The
+regularization term LReg improves the realism and general-
+ization of the output of the ISR model. This objective can
+be understood as aligning the ISR output ˆxH’s distribution,
+qθ(ˆxH), with the high-quality data xH’s distribution p(xH)
+by minimizing the KL-divergence [25]:
+min
+θ
+DKL (qθ(ˆxH)∥p(xH)) (2)
+While several studies [46, 47, 63] have employed adver-
+sarial loss to optimize this objective, they often encounter
+issues like mode collapse and training instability. Recent
+work [53] achieved state-of-the-art results using Variational
+Score Distillation (VSD) as the regularization loss to mini-
+mize this objective, which inspires our research.
+Variational Score Distillation. Variational Score Distilla-
+tion (VSD) [51] was initially introduced for text-to-3D gen-
+eration, by distilling a pre-trained text-to-image diffusion
+model to optimize a single 3D representation [36].
+In the VSD framework, a pre-trained diffusion model,
+represented as ϵψ, and its trainable (LoRA [19]) replica ϵϕ,
+are used to regularize the generator network Gθ. As out-
+lined in ProlificDreamer [51], the gradient with respect to
+the generator parameters θ is formulated as follows:
+∇θLVSD (ˆz, cy)
+= Et,ϵ
+
+ω(t) (ϵψ(ˆzt; t, cy) − ϵϕ(ˆzt; t, cy)) ∂ˆz
+∂θ
+ (3)
+where ˆzt = αt ˆz +σtϵ is the noisy input, ˆz is the latent out-
+putted by the generator network Gθ, ϵ is a Gaussian noise,
+3
+and αt, σt are the noise-data scaling constants. cy is a text
+embedding corresponding to a caption that describes the in-
+put image, and w(t) is a time-varying weighting function.
+3.2. Overview of TSD-SR
+As depicted in Fig. 2, our goal is to distill a given pre-trained
+T2I DM into a fast one-step Student Model Gθ, using the
+Teacher Model ϵψ and the trainable LoRA Model ϵϕ. We
+denote the latent output of the distilled model asˆz0, and the
+HQ latent representation as z0. Both ˆz0 and z0 are passed
+through our Distribution-Aware Sampling Module (DASM)
+to obtain distribution-based samples ˆzt and zt (Sec. 3.4).
+We train Gθ by minimizing the two losses: a reconstruction
+loss in pixel space to compare the model outputs against the
+ground truth, and a regularization loss (from Target Score
+Distillation) to enhance the realism (Sec. 3.3). After updat-
+ing the Student Model, we update the LoRA Model with the
+diffusion loss. Finally, in Sec. 3.5, we present an overview
+of all the losses encountered during the training phase.
+3.3. Target Score Distillation
+Similar to [53], we introduce VSD loss into our work as
+a regularization term to enhance the realism and general-
+ization of the Gθ’s outputs. Upon reviewing VSD Eq. (3),
+ϵϕ(ˆzt; t, cy) represents the current estimated gradient direc-
+tion for Gθ’s noisy outputs ˆzt, whereas ϵψ(ˆzt; t, cy) corre-
+sponds to the ideal gradient direction guiding towards more
+realistic outputs. The overarching goal of model optimiza-
+tion is to align the suboptimal gradient direction with the
+superior direction based on pre-trained priors, thus facilitat-
+ing the optimization of the Student distribution toward that
+of the Teacher. However, this strategy encounters hurdles,
+especially in the early training phase: the quality of syn-
+thetic latent ˆzt is not high enough for the Teacher Model
+to provide a precise prediction. As illustrated in Fig. 3, the
+Teacher Model struggles to accurately predict the optimiza-
+tion direction for low-quality synthetic latent ˆzt in the early
+stage, as indicated by a cosine similarity of only 0.2 to the
+ideal direction, compared to 0.88 for high-quality latent zt.
+This problem can lead to severe visual artifacts, as is evident
+in Fig. 4(a).
+A straightforward remedial measure is to employ a mean
+squared error (MSE) loss to align the synthetic latent with
+the ideal inputs of the Teacher Model, which are derived
+from the HQ latent. However, as shown in Fig. 4(b), this
+approach has been observed to lead to over-smoothed re-
+sults [13]. Our strategy, instead, is to align the predic-
+tions made by the Teacher Model on both synthetic and HQ
+latent, thereby encouraging greater consistency between
+them. The core idea is that for samples drawn from the same
+distribution, the real scores predicted by the Teacher Model
+should be close to each other. We refer to this approach as
+Predicted Direction
+True Direction
+Cosine Similarity
+0.88 Cosine Similarity
+0.17
+Figure 3. A visual comparison of the gradient direction. We set
+the timestep t to 100 and calculated the cosine similarity between
+the prediction directions from the Teacher Model and the true di-
+rection (towards the HQ data). The prediction direction for zt
+closely matches the true direction, but not for ˆzt, suggesting that
+suboptimal samples may lead to directional deviations.
+(a) Naive
+ (b) MSE
+ (c) Ours
+Figure 4. The visualization of different strategies. (a) The naive
+method introduces fake textures and fails to recover fine details.
+(b) MSE leads to over-smoothed generation results, lacking high-
+frequency information. (c) Our method offers the superior visual
+effects and fine textures.
+Target Score Matching (TSM):
+∇θLTSM(ˆz, z, cy)
+= Et,ϵ
+
+w(t)(ϵψ(ˆzt; t, cy) − ϵψ(zt; t, cy))∂ˆz
+∂θ
+ (4)
+where the expectation of the gradient is computed across
+all diffusion timesteps t ∈ {1, ··· , T} and ϵ ∼ N(0, I).
+Equation (4) encapsulates the optimization loss for our Tar-
+get Score Matching. Upon examining it in conjunction with
+Eq. (3), we notice that VSD utilizes the prediction residual
+between the Teacher and the LoRA Model to drive gradient
+backpropagation. Similarly, our TSM employs the synthetic
+and the HQ data to produce the gradients. By blending these
+two strategies with hyperparameter weights λ and 1 − λ,
+we construct a combined optimization loss that effectively
+unifies the strengths of both approaches, as formulated in
+4
+(a) Predicted Residual at Different Timesteps in VSD
+(b) Stage 1 
+(c) Stage 2  
+Figure 5. (a) The prediction errors of the VSD loss at differ-
+ent timesteps. The error divergence is more pronounced in early
+timesteps than later. This phenomenon is observed throughout the
+optimization process. (b) The visualization of Stage 1 prediction
+error. (c) The visualization of Stage 2 prediction error.
+Eq. (5), to guide the training process.
+∇θLTSD(ˆz, z, cy) =Et,ϵ
+h
+w(t)[ϵψ(ˆzt; t, cy)−
+ϵψ(zt; t, cy) +λ(ϵψ(zt; t, cy) − ϵϕ(ˆzt; t, cy))]∂ˆz
+∂θ
+i (5)
+where w(t) is a time-aware weighting function tailored for
+Real-ISR. Other symbols are consistent with those previ-
+ously defined. By introducing the prediction of the pre-
+trained diffusion model on HQ latent, we have circum-
+vented the issue of the model falling into visual artifacts or
+producing over-smoothed results, as illustrated in Fig. 4(c).
+3.4. Distribution-Aware Sampling Module
+In the VSD-based framework, it is necessary to match the
+score functions predicted by the Teacher Model and the
+LoRA Model across timesteps t ∈ 0, 1, . . . , T. However,
+for the Real-ISR problem, this matching performance is
+inconsistent across timesteps, as illustrated in Fig. 5(a).
+This phenomenon may be attributed to the reliance on low-
+frequency (LF) priors in the LQ data, while lacking guid-
+ance from high-frequency (HF) details. The output sam-
+ple ˆz0, derived from LQ data, contains low-frequency (LF)
+priors that are easily captured by the LoRA Model, result-
+ing in similar predictions during LF restoration (Stage 1),
+as shown in Fig. 5(b). However, in Stage 2, due to the
+absence of high-frequency (HF) details in ˆz0, the LoRA
+Model struggles to reconstruct fine-grained features, lead-
+ing to divergent predictions, as illustrated in Fig. 5(c). To
+address this issue, we aim to reduce such divergence.
+Existing methods match the score function at each iter-
+ation using a single latent sample ˆzt, with the timestep t
+drawn from a uniform distribution. This leads to slow con-
+vergence and even training difficulty during Stage 2, as gra-
+dients from important timesteps are diluted by uniform av-
+VSD and TSM
+...
+Diffusion
+Noise
+Noise
+(a) Origin VSD-based Noise Inputs
+(b) DASM Noise Inputs
+Diffusion
+Figure 6. Illustration of DASM. Top: The naive approach that
+adds noise directly to the samples. Bottom: The proposed DASM
+leverages diffusion model priors to generate noisy latent that better
+align with the true sampling trajectory. These noisy samples can
+all serve as inputs to the downstream network, enabling effective
+gradient backpropagation.
+eraging. To this end, we propose our Distribution-Aware
+Sampling Module (DASM). This module accumulates op-
+timization gradients for earlier timestep samples in a sin-
+gle iteration, enabling the backpropagation of more gradi-
+ents focused on detail optimization. As shown in Fig. 6,
+we first obtain the noisy synthetic latent representation as
+ˆzt = (1−σt)ˆz0 +σtϵ, where σt is a weighting factor andϵ
+denotes Gaussian noise. Subsequently, we employ a LoRA
+Model to perform denoising, yielding noisy samples at the
+previous timestep as described in Eq. (6):
+ˆzt−1 = ˆzt + (σt−1 − σt) · ϵϕ(ˆzt; t, cy), (6)
+The parameters σt−1 and σt are obtained from the flow
+matching scheduler. Here, the LoRA Model has learned
+the distribution of ˆz0. Similarly, zt−1 can be obtained
+by denoising using the Teacher Model. In a single itera-
+tion, gradients from noisy samples along the sampling tra-
+jectory can be accumulated to update the Student Model.
+Since these samples follow the diffusion sampling trajec-
+tory and are concentrated at early timesteps, this approach
+effectively reduces the divergence observed in Stage 2.
+3.5. Training Objective
+We summarize all the losses that we used in our framework.
+Student Model Gθ. We train our Student Model with the
+reconstruction loss LRec and the regularization loss LReg.
+For the reconstruction loss, we use the LP IP Sloss in the
+pixel space and the MSE loss in the latent space:
+LRec (Gθ(xL), xH)
+= γ1LLPIPS (Gθ(xL), xH) +LMSE (zt, ˆzt) . (7)
+For the regularization loss, we use our TSD loss, Eq. (5).
+Therefore, the overall training objective for the Student
+Model Gθ is:
+LStu = LRec + γ2LReg, (8)
+where γ1 and γ2 are weighting factors. We initialize both
+γ1 and γ2 to 1 at the beginning of training. As optimization
+5
+progresses, we ramp up γ1 from 1 to 2 while maintaining
+γ2 at its initial value.
+LoRA Model ϵϕ. As stipulated by VSD, the replicaϵϕ must
+be trainable, with its training objective being:
+LDiff (ˆz, cy) =Et,ϵ[∥ϵϕ(ˆzt; t, cy) − ϵ′∥2], (9)
+where ϵ′ serves as the training target for the denoising net-
+work, representing Gaussian noise in the context of DDPM,
+and a gradient towards HQ data for flow matching.
+4. Experiments
+4.1. Experimental Settings
+Training Datasets. For training, we utilize DIV2K [1],
+Flickr2K [43], LSDIR [27], and the first 10K face images
+from FFHQ [20]. To synthesize LR-HR pairs, we adopt the
+same degradation pipeline as in Real-ESRGAN [47].
+Test Datasets. We evaluate our model on the synthetic
+DIV2K-Val [1] dataset, as well as two real-world datasets:
+RealSR [4] and DRealSR [52]. The real-world datasets con-
+sist of 128×128 low-quality (LQ) and 512×512 high-quality
+(HQ) image pairs. For the synthetic set, 3,000 pairs were
+generated by cropping 512×512 patches from DIV2K-Val
+and applying the Real-ESRGAN [47] degradation pipeline
+to downsample them to 128×128.
+Evaluation Metrics. To evaluate our method, we em-
+ploy both full-reference and no-reference metrics. The full-
+reference metrics include PSNR and SSIM [50] (computed
+on the Y channel of the YCbCr color space) for fidelity;
+LPIPS [66] and DISTS [7] for perceptual quality; and FID
+[14] for measuring distribution similarity. The no-reference
+metrics include NIQE [64], MANIQA [56], MUSIQ [22],
+and CLIPIQA [44].
+Compared Methods. We categorize the test models into
+two groups: single-step and multi-step inference. The
+single-step inference diffusion models include SinSR [49],
+AddSR [55], and OSEDiff [53]. The multi-step inference
+diffusion models comprise StableSR [45], ResShift [62],
+PASD [57], DiffBIR [29], SeeSR [54], SUPIR [61], and
+AddSR [55]. Specifically, for AddSR, we have conducted
+comparisons between its single-step and four-step models.
+GAN-based Real-ISR methods [5, 28, 47, 63] are detailed
+in the supplementary material.
+Implementation Details. All models are initialized from
+the Teacher Model (SD3 [10] in our work). Similar to
+OSEDiff [53], we only train the V AE encoder and the de-
+noising network in the Student Model, freezing the V AE
+decoder to preserve its prior [24]. We utilize the default
+prompt for the Student Model, while prompts are extracted
+from HQ images for the Teacher and LoRA models dur-
+ing training. We adopt the AdamW optimizer [30] with a
+learning rate of 5e-6 for the Student Model and 1e-6 for the
+LoRA Model, setting the LoRA rank to 64 for both models.
+During the initial training phase, we incorporate MSE loss
+in the latent space and exclude DASM to stabilize training
+and reduce time cost. In later stages, we remove the MSE
+loss to avoid over-smoothed results and introduce DASM to
+enhance restoration quality. The training process took ap-
+proximately 96 hours, utilizing 8 NVIDIA V100 GPUs with
+a batch size of 16.
+4.2. Comparison with Existing Methods
+Quantitative Comparisons. Tab. 1 shows the quantitative
+comparison of our method with other single-step diffusion
+models on three datasets. Our method achieves the best re-
+sults across most evaluation metrics. SinSR and AddSR,
+as distilled versions of previous multi-step super-resolution
+methods, significantly reduce inference steps while suffer-
+ing a corresponding drop in performance. OSEDiff intro-
+duces the VSD loss from 3D generation tasks into the Real-
+ISR without fully accounting for the substantial differences
+between the two domains. As a result, its no-reference im-
+age quality metrics are not satisfactory. In contrast, our pro-
+posed TSD-SR, specifically designed for Real-ISR, outper-
+forms all other single-step models in the vast majority of
+key metrics.
+Tab. 2 shows the quantitative comparison with multi-
+step models. We can draw the following conclusions: (1)
+TSD-SR demonstrates significant advantages over compet-
+ing methods in terms of LPIPS, DISTS, and NIQE. Ad-
+ditionally, it outperforms most multi-step models in FID,
+MUSIQ, and CLIPIQA. (2) DiffBIR, SeeSR, PASD, and
+AddSR achieve better results in terms of MANIQA, which
+may be attributed to the fact that multi-step models ben-
+efit from more denoising iterations to generate richer de-
+tails. (3) ResShift stands out with the highest PSNR and
+SSIM scores, while StableSR also performs well in terms
+of DISTS and FID. However, both models underperform on
+the no-reference metrics.
+Finally, we explain the relatively lower PSNR and SSIM
+scores observed in our experiments. Several studies [55, 61]
+have shown that these reconstruction metrics are not well-
+suited for the evaluation of Real-ISR tasks. Models that
+recover more realistic or detailed textures often yield lower
+PSNR and SSIM scores, reflecting a fundamental trade-off
+between perceptual quality and pixel-wise fidelity [3, 32,
+68]. This phenomenon has also been extensively discussed
+in the other research work [3, 32, 45, 55, 61, 66, 68]. LPIPS
+[66] is proposed to overcome the limitation that PSNR and
+SSIM fail to align with human judgments in spatial ambigu-
+ities situations. Other DMs-based SR researchers [45, 61]
+argue that DMs introduce superior pre-trained priors, en-
+abling the restoration of information that traditional meth-
+ods (from scratch) cannot achieve. However, such capabil-
+ity often leads to a decline in pixel-level metrics, as they
+prioritize distribution modeling and sampling from learned
+6
+Table 1. Quantitative comparison with the state-of-the-art one-step methods across both synthetic and real-world benchmarks. The number
+of diffusion inference steps is indicated by ‘s’. The best results of each metric are highlighted in red.
+Datasets Method PSNR↑ SSIM↑ LPIPS↓ DISTS↓ FID↓ NIQE↓ MUSIQ↑ MANIQA↑ CLIPIQA↑
+OSEDiff-1s 27.92 0.7836 0.2968 0.2162 135.51 6.4471 64.69 0.5898 0.6958
+AddSR-1s 27.77 0.7722 0.3196 0.2242 150.18 6.9321 60.85 0.5490 0.6188
+SinSR-1s 28.38 0.7497 0.3669 0.2484 172.72 6.9606 55.03 0.4904 0.6412DRealSR
+Ours-1s 27.77 0.7559 0.2967 0.2136 134.98 5.9131 66.62 0.5874 0.7344
+OSEDiff-1s 25.15 0.7341 0.2920 0.2128 123.48 5.6471 69.10 0.6326 0.6687
+AddSR-1s 24.79 0.7077 0.3091 0.2191 132.05 5.5440 66.18 0.6098 0.5722
+SinSR-1s 26.27 0.7351 0.3217 0.2341 137.59 6.2964 60.76 0.5418 0.6163RealSR
+Ours-1s 24.81 0.7172 0.2743 0.2104 114.45 5.1298 71.19 0.6347 0.7160
+OSEDiff-1s 23.72 0.6109 0.2942 0.1975 26.34 4.7089 67.96 0.6131 0.6681
+AddSR-1s 23.26 0.5902 0.3623 0.2123 29.68 4.7610 63.39 0.5657 0.5734
+SinSR-1s 24.41 0.6018 0.3262 0.2068 35.55 5.9981 62.95 0.5430 0.6501DIV2K-Val
+Ours-1s 23.02 0.5808 0.2673 0.1821 29.16 4.3244 71.69 0.6192 0.7416
+Table 2. Quantitative comparison with state-of-the-art multi-step methods across both synthetic and real-world benchmarks. The number
+of diffusion inference steps is indicated by ‘s’. The best and second best results of each metric are highlighted in red and blue, respectively.
+Datasets Method PSNR↑ SSIM↑ LPIPS↓ DISTS↓ FID↓ NIQE↓ MUSIQ↑ MANIQA↑ CLIPIQA↑
+StableSR-200s 28.04 0.7454 0.3279 0.2272 144.15 6.5999 58.53 0.5603 0.6250
+DiffBIR-50s 25.93 0.6525 0.4518 0.2761 177.04 6.2324 65.66 0.6296 0.6860
+SeeSR-50s 28.14 0.7712 0.3141 0.2297 146.95 6.4632 64.74 0.6022 0.6893
+SUPIR-50s 25.09 0.6460 0.4243 0.2795 169.48 7.3918 58.79 0.5471 0.6749
+PASD-20s 27.79 0.7495 0.3579 0.2524 171.03 6.7661 63.23 0.5919 0.6242
+ResShift-15s 28.69 0.7874 0.3525 0.2541 176.77 7.8762 52.40 0.4756 0.5413
+AddSR-4s 26.72 0.7124 0.3982 0.2711 164.12 7.6689 66.33 0.6257 0.7226
+DRealSR
+Ours-1s 27.77 0.7559 0.2967 0.2136 134.98 5.9131 66.62 0.5874 0.7344
+StableSR-200s 24.62 0.7041 0.3070 0.2156 128.54 5.7817 65.48 0.6223 0.6198
+DiffBIR-50s 24.24 0.6650 0.3469 0.2300 134.56 5.4932 68.35 0.6544 0.6961
+SeeSR-50s 25.21 0.7216 0.3003 0.2218 125.10 5.3978 69.69 0.6443 0.6671
+SUPIR-50s 23.65 0.6620 0.3541 0.2488 130.38 6.1099 62.09 0.5780 0.6707
+PASD-20s 25.68 0.7273 0.3144 0.2304 134.18 5.7616 68.33 0.6323 0.5783
+ResShift-15s 26.39 0.7567 0.3158 0.2432 149.59 6.8746 60.22 0.5419 0.5496
+AddSR-4s 23.33 0.6400 0.3925 0.2626 154.22 5.8959 71.49 0.6826 0.7225
+RealSR
+Ours-1s 24.81 0.7172 0.2743 0.2104 114.45 5.1298 71.19 0.6347 0.7160
+StableSR-200s 23.27 0.5722 0.3111 0.2046 24.95 4.7737 65.78 0.6164 0.6753
+DiffBIR-50s 23.13 0.5717 0.3469 0.2108 33.93 4.6056 68.54 0.6360 0.7125
+SeeSR-50s 23.73 0.6057 0.3198 0.1953 25.81 4.8322 68.49 0.6198 0.6899
+SUPIR-50s 22.13 0.5279 0.3919 0.2312 31.40 5.6767 63.86 0.5903 0.7146
+PASD-20s 24.00 0.6041 0.3779 0.2305 39.12 4.8587 67.36 0.6121 0.6327
+ResShift-15s 24.71 0.6234 0.3473 0.2253 42.01 6.3615 60.63 0.5283 0.5962
+AddSR-4s 22.16 0.5280 0.4053 0.2360 35.41 5.2584 70.99 0.6596 0.7593
+DIV2K-Val
+Ours-1s 23.02 0.5808 0.2673 0.1821 29.16 4.3244 71.69 0.6192 0.7416
+distributions over strict pixel fidelity. We anticipate the de-
+velopment of better full-reference metrics in the future to
+assess advanced Real-ISR methods. Refer to the supple-
+mentary material for detailed visual comparisons.
+Qualitative Comparisons. Fig. 7 presents visual compar-
+isons of different Real-ISR methods. As shown in the re-
+sults of multi-step methods, SeeSR leverages degradation-
+aware semantic cues to incorporate image generation pri-
+ors, but it tends to produce over-smoothed textures in some
+cases. SUPIR demonstrates notably robust generative capa-
+bilities. However, the excessive generation of fine details
+can result in outputs that appear less natural (e.g., adding
+unnecessary wrinkles around the eyes of a young girl). Un-
+der more realistic degradation conditions, PASD finds it dif-
+ficult to recover the appropriate content, indicating limited
+robustness. Among single-step methods, SinSR tends to
+produce artifacts, likely due to its base model, ResShift, be-
+ing trained from scratch without adequate exposure to real-
+world priors, which leads to inferior image restoration qual-
+ity. AddSR produces over-smoothed results when using its
+7
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+Figure 7. Visual comparisons of different Real-ISR methods. Please zoom in for a better view.
+Table 3. Comparison of computational complexity across different diffusion model-based methods. Performance is measured on an A100
+GPU using 512×512 input images, excluding model weight and data loading time.
+StableSR DiffBIR SeeSR SUPIR PASD ResShift AddSR AddSR SinSR OSEDiff Ours
+Inference Step 200 50 50 50 20 15 4 1 1 1 1
+Inference Time 12.4151 7.9637 5.8167 16.8704 4.8441 0.7546 1.0199 0.5043 0.1424 0.1650 0.1362
+1-step model. OSEDiff demonstrates better restoration per-
+formance than SinSR and AddSR; however, it may fall short
+in terms of authenticity and naturalness, particularly in re-
+covering fine details. In contrast, our method effectively
+generates rich textures and realistic details with enhanced
+sharpness and contrast. Additional visual comparisons and
+results are provided in the supplementary material.
+Complexity Comparisons We assess the computational
+complexity of the state-of-the-art DM-based Real-ISR
+methods, as detailed in Tab. 3, with a focus on inference
+time. Each method is benchmarked on an A100 GPU using
+input images of size 512×512 pixels. We disregarded the
+loading time for model weights and data. The main com-
+putation time consists of: (1) text extraction time (if a text
+extractor is used); (2) text encoder computation time (if ap-
+plicable); (3) V AE encoding and decoding time; and (4) de-
+noising network execution time. It is evident that TSD-SR
+holds a substantial advantage in inference speed compared
+to multi-step models. Specifically, TSD-SR is over 120×
+faster than SUPIR, 90× faster than StableSR, approximately
+50× faster than DiffBIR, over 40× faster than SeeSR, more
+than 35× faster than PASD, and 4× faster than ResShift.
+When compared with existing one-step models, our method
+achieves the fastest inference times. This advantage is at-
+tributed to directly denoising from LQ data and employing
+a fixed prompt.
+4.3. User Study
+We conduct a user study comparing our method with three
+other diffusion-based one-step super-resolution methods.
+To ensure a comprehensive evaluation, we selected images
+from five categories—human faces, buildings, animals, veg-
+etation, and characters. A total of 50 participants took part
+in the voting process. Participants were instructed to select
+the best restoration results based on similarity to the HQ
+image, structural similarity to the LQ image, and realism of
+textures and details. The results in Fig. 8 indicate that our
+method received a 69.2% approval rate from users. Specif-
+ically, our method achieved 57.6% in Animals, 70.0% in
+Buildings, 68.8% in Human Faces, 65.2% in Vegetation,
+8
+Figure 8. Results of our user study. Left: Category-based user
+preference radar chart, showing that our model received the high-
+est favor across all categories. Right: User preference pie chart,
+illustrating that our approach garnered a 69.2% user satisfaction
+rating.
+Table 4. Ablation study of Target Score Matching loss and
+Distribution-Aware Sampling Module.
+DatasetsMethodLPIPS↓ DISTS↓ FID↓ MUSIQ↑ MANIQA↑ CLIPIQA↑
+DRealSRw/o TSM0.3176 0.2327 139.67 63.90 0.5749 0.6958w/o DASM0.3097 0.2311 143.97 63.56 0.5812 0.7123Full 0.2967 0.2136 134.98 66.62 0.5874 0.7344
+RealSRw/o TSM0.2934 0.2397 117.15 68.56 0.6338 0.6987w/o DASM0.2873 0.2273 123.51 69.05 0.6273 0.7031Full 0.2743 0.2104 114.45 71.19 0.6347 0.7160
+and 84.4% in Characters, surpassing those of other meth-
+ods.
+4.4. Ablation Study
+Effectiveness of TSM and DASM. To validate the effec-
+tiveness of the TSM loss and DASM, we conduct ablation
+studies by removing each component separately. We se-
+lect LPIPS, DISTS, MUSIQ, MANIQA, and CLIPIQA for
+comparison, as these metrics are critical for image quality
+assessment. Additionally, FID is used to evaluate distribu-
+tion similarity. The results are presented in Tab. 4. From the
+results, we draw the following conclusions: (1) The absence
+of TSM loss and DASM negatively impacts performance
+across both reference-based metrics (LPIPS, DISTS) and
+no-reference metrics (MUSIQ, MANIQA, and CLIPIQA).
+The FID metric is also adversely affected, indicating a de-
+cline in distribution fidelity. (2) The lack of TSM leads to a
+significant decrease in LPIPS, DISTS, MUSIQ, and CLIP-
+IQA, possibly due to unreliable directions in VSD leading
+to unrealistic generations. (3) The absence of DASM results
+in a decline in FID, MUSIQ, and CLIPIQA, possibly due to
+suboptimal detail optimization.
+Base model for fairer comparison. To validate the ef-
+fectiveness of our method across different versions of SD
+models, we conduct additional experiments on SD2-base
+and SD2.1-base models, as shown in Tab. 5. The per-
+formance is evaluated on the DRealSR test dataset [52].
+Our method demonstrates superior performance compared
+to other one-step SR methods, including OSEDiff [53] and
+Table 5. Fair comparison using the same base model to validate
+TSD-SR
+Model Base Model LPIPS↓ DISTS↓ NIQE↓ MUSIQ↑ CLIPIQA↑
+AddSR SD2-base 0.3196 0.2242 6.9321 60.85 0.6188Ours SD2-base0.3040 0.2234 6.2202 65.14 0.6935
+OSEDiff SD2.1-base 0.2968 0.2162 6.4471 64.69 0.6958Ours SD2.1-base0.2943 0.2115 5.7934 65.41 0.7109
+Table 6. Ablation studies for hyperparameter N and s.
+N s LPIPS↓ DISTS↓ FID↓ MUSIQ↑ MANIQA↑ CLIPIQA↑
+2 50 0.3104 0.2327 137.64 64.49 0.5717 0.71184 50 0.2967 0.2136 134.98 66.62 0.5874 0.73448 50 0.3421 0.2633 151.64 65.730.5875 0.72274 25 0.3063 0.2201 130.74 66.190.5828 0.72694 100 0.3176 0.2230 135.54 65.23 0.5782 0.7024
+AddSR [55]. Specifically, our SD2-base model outper-
+forms single-step AddSR across all perceptual reference
+and no-reference metrics, particularly excelling in NIQE
+[64], MUSIQ [22], and CLIPIQA [44]. Meanwhile, our
+SD2.1-base model shows comparable or better performance
+than OSEDiff across various metrics, with notable improve-
+ments in NIQE and CLIPIQA.
+Parameters N and s in DASM. We compare performance
+under different combinations of N and s in Tab. 6. The
+evaluation is conducted on the DRealSR test dataset. In our
+setting, N is set to 4 and s to 50 (highlighted in bold in
+the table). Performance degrades when N is either larger or
+smaller, possibly due to its effect on regularization strength.
+Since DASM is computationally expensive, we prefer a
+smaller N. After balancing training time and performance,
+we select N = 4 as the final value. Smaller values of s
+yield similar performance, while larger values degrade im-
+age quality. Experimental results suggest that choosing s
+between 25 and 75 achieves better overall performance.
+5. Conclusion and Limitation
+We propose TSD-SR, an effective one-step model for Real-
+ISR based on diffusion priors. TSD-SR utilizes TSD to en-
+hance the realism of images generated by the distillation
+model, and leverages DASM to sample distribution-based
+noisy latents and accumulate their gradients, thereby im-
+proving detail recovery. Our experiments demonstrate that
+TSD-SR outperforms existing one-step Real-ISR models in
+both restoration quality and inference speed.
+limitations. Although our model achieves excellent infer-
+ence speed and restoration performance, it still contains sig-
+nificantly more parameters compared to previous GAN- or
+non-diffusion-based methods. In future work, we plan to
+apply pruning or quantization techniques to compress the
+model, aiming to develop a lightweight and efficient Real-
+ISR solution.
+9
+6. Acknowledgment
+This work was supported by National Natural Science
+Foundation of China (62293554, U2336212), Zhe-
+jiang Provincial Natural Science Foundation of China
+(LD24F020007), National Key R&D Program of China
+(SQ2023AAA01005), Ningbo Innovation “Yongjiang
+2035” Key Research and Development Programme
+(2024Z292), and Young Elite Scientists Sponsorship
+Program by CAST (2023QNRC001).
+10
+Supplementary Material
+In this Supplementary Material, we provide additional de-
+tails, including the comparison with GAN-based methods
+in Appendix A, more visual comparisons in Appendix B,
+comparisons of full-reference metrics and human prefer-
+ence in Appendix C, theory of Target Score Matching in
+Appendix D and algorithm in Appendix E. We conduct
+these additional comparisons and analyses to validate the
+effectiveness of TSD-SR.
+A. Comparison with GAN-based Methods
+We compare our method with GAN-based approaches in
+Tab. 7. While the GAN methods show advantages in full-
+reference metrics such as PSNR and SSIM, our model out-
+performs them across all no-reference metrics. Prior stud-
+ies have highlighted the limitations of PSNR and SSIM
+for evaluating image super-resolution performance [55, 61].
+Their effectiveness in assessing image fidelity in complex
+degradation scenarios remains debatable, as pixel-level mis-
+alignment often arises when restoring severely degraded
+images. However, no-reference metrics evaluate image
+quality based solely on the individual image, without re-
+quiring alignment with the ground truth. Therefore, in more
+complex and realistic degradation scenarios, they may offer
+a more appropriate evaluation of super-resolution results.
+In Appendix C, we further provide a visual comparison be-
+tween full-reference metrics and human preferences, and in
+Fig. 9, we present a visual comparison with GAN-based
+methods. From these visualizations, it is evident that our
+model produces more realistic texture details than the GAN-
+based approaches.
+B. More Visual Comparisons
+In Figs. 10 to 12, we provide additional visual comparisons
+with other diffusion-based methods. These examples fur-
+ther demonstrate the robust restoration capabilities of TSD-
+SR and the high quality of the restored images.
+C. Comparisons of Full-reference Metrics and
+Human Preference
+We present additional comparative experiments in Figure 13
+to demonstrate the limitations of PSNR and SSIM in as-
+sessing image fidelity under complex degradation scenarios.
+As observed, GAN-based methods with higher PSNR and
+SSIM scores tend to produce over-smoothed or fragmented
+textures, raising concerns about their realism and perceptual
+fidelity. In contrast, our approach sacrifices some PSNR and
+SSIM performance to achieve more natural detail restora-
+tion, resulting in enhanced realism and broader perceptual
+acceptance. An additional user study shows that 90.28% of
+participants prefer our results over those of methods with
+higher PSNR and SSIM scores.
+D. Theory of Target Score Matching
+The core idea of Target Score Matching (TSM) is that
+for samples drawn from the same distribution, the real
+scores predicted by the Teacher Model should be close to
+each other. Thus, we minimize the MSE loss between the
+Teacher Model’s predictions on ˆzt and zt by
+LMSE(ˆz, z, cy)
+= Et,ϵ
+
+w(t)∥ϵψ(ˆzt; t, cy) − ϵψ(zt; t, cy)∥2
+2
+ (10)
+where the expectation of the gradient is computed across all
+diffusion timesteps t ∈ {1, ··· , T} and ϵ ∼ N(0, I).
+Table 7. Quantitative comparison with GAN-based methods on both synthetic and real-world benchmarks. The best results of each metric
+are highlighted in red.
+Datasets Method PSNR↑ SSIM↑ LPIPS↓ DISTS↓ FID↓ NIQE↓ MUSIQ↑ MANIQA↑ CLIPIQA↑
+BSRGAN 28.70 0.8028 0.2858 0.2143 155.61 6.5408 57.15 0.4847 0.5091
+Real-ESRGAN 28.61 0.8051 0.2818 0.2088 147.66 6.7001 54.27 0.4888 0.4521
+LDL 28.20 0.8124 0.2791 0.2127 155.51 7.1448 53.94 0.4894 0.4476
+FeMASR 26.87 0.7569 0.3156 0.2238 157.72 5.9067 53.70 0.4413 0.5633
+DRealSR
+Ours 27.77 0.7559 0.2967 0.2136 134.98 5.9131 66.62 0.5874 0.7344
+BSRGAN 26.38 0.7651 0.2656 0.2123 141.24 5.6431 63.28 0.5425 0.5114
+Real-ESRGAN 26.65 0.7603 0.2726 0.2065 136.29 5.8471 60.45 0.5507 0.4518
+LDL 25.28 0.7565 0.2750 0.2119 142.74 5.9880 60.92 0.5494 0.4559
+FeMASR 25.06 0.7356 0.2936 0.2285 141.01 5.7696 59.05 0.4872 0.5405
+RealSR
+Ours 24.81 0.7172 0.2743 0.2104 114.45 5.1298 71.19 0.6347 0.7160
+BSRGAN 24.58 0.6269 0.3502 0.2280 49.55 4.7501 61.68 0.4979 0.5386
+Real-ESRGAN 24.02 0.6387 0.3150 0.2123 38.87 4.8271 60.38 0.5401 0.5251
+LDL 23.83 0.6344 0.3256 0.2227 42.28 4.8555 60.04 0.5328 0.5180
+FeMASR 22.45 0.5858 0.3370 0.2205 41.97 4.8679 57.94 0.4787 0.5769
+DIV2K-Val
+Ours 23.02 0.5808 0.2673 0.1821 29.16 4.3244 71.69 0.6192 0.7416
+11
+HR
+Real-ESRGANBSRGANZoomed LR
+OursFeMaSRLDL
+HR
+Real-ESRGANBSRGANZoomed LR
+OursFeMaSRLDL
+LR
+Real-ESRGANBSRGANZoomed LR
+OursFeMaSRLDL
+LR
+Real-ESRGANBSRGANZoomed LR
+OursFeMaSRLDL
+Figure 9. Qualitative comparisons between TSD-SR and GAN-based Real-ISR methods. Please zoom in for a better view.
+12
+To understand the difficulties of this approach, consider
+the gradient of
+∇θLMSE(ˆz, z, cy) =Et,ϵ
+h
+w(t) · ∂ϵψ(ˆzt; t, cy)
+∂ˆzt| {z }
+Diffusion Jacobian
+(ϵψ(ˆzt; t, cy) − ϵψ(zt; t, cy))| {z }
+Prediction Residual
+∂ˆz
+∂θ|{z}
+Generator Jacobian
+i (11)
+where we absorb ∂ˆzt
+∂ˆz and the other constant into w(t). The
+computation of the Diffusion Jacobian term is computation-
+ally demanding, as it necessitates backpropagation through
+the Teacher Model. DreamFusion [36] found that this term
+struggles with small noise levels due to its training to ap-
+proximate the scaled Hessian of marginal density. This
+work also demonstrated that omitting the Diffusion Jaco-
+bian term leads to an effective gradient for optimizing. Sim-
+ilar to their approach, we update Eq. (11) by omitting Dif-
+fusion Jacobian:
+∇θLTSM(ˆz, z, cy) =
+Et,ϵ
+h
+w(t) (ϵψ(ˆzt; cy, t) − ϵψ(zt; cy, t))| {z }
+Prediction Residual
+∂ˆz
+∂θ|{z}
+Generator Jacobian
+i
+(12)
+The effectiveness of the method can be proven by start-
+ing from the KL divergence. We can use a Sticking-the-
+Landing [39] style gradient by thinking of ϵψ(zt; cy, t) as a
+control variate for ˆϵ. For detailed proof, refer to Appendix
+4 of DreamFusion [36]. It demonstrates that the gradient of
+this loss yields the same updates as optimizing the training
+loss LMSE Eq. (10), excluding the Diffusion Jacobian term.
+Compared with the VSD loss, we find that the term “Pre-
+diction Residual” has changed, and the two losses are sim-
+ilar in the gradient update mode. Specifically, we find that
+VSD employs identical inputs for both the Teacher and
+LoRA models to compute the gradient, while here TSM
+uses high-quality and suboptimal inputs for the Teacher
+Model. The losses are related to each other through
+ϵϕ(ˆzt; t, cy).
+E. Algorithm
+Algorithm 1 details our TSD-SR training procedure.
+We use classifier-free guidance (cfg) for the Teacher
+Model and the LoRA Model. The cfg weight is set to 7.5.
+References
+[1] Eirikur Agustsson and Radu Timofte. Ntire 2017 challenge
+on single image super-resolution: Dataset and study. In Pro-
+ceedings of the IEEE conference on computer vision and pat-
+tern recognition workshops, pages 126–135, 2017. 6
+[2] Martin Arjovsky, Soumith Chintala, and L ´eon Bottou.
+Wasserstein generative adversarial networks. In Interna-
+tional conference on machine learning , pages 214–223.
+PMLR, 2017. 1, 2
+[3] Yochai Blau and Tomer Michaeli. The perception-distortion
+tradeoff. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 6228–6237, 2018. 6
+[4] Jianrui Cai, Hui Zeng, Hongwei Yong, Zisheng Cao, and Lei
+Zhang. Toward real-world single image super-resolution:
+A new benchmark and a new model. In Proceedings of
+the IEEE/CVF international conference on computer vision,
+pages 3086–3095, 2019. 6
+[5] Chaofeng Chen, Xinyu Shi, Yipeng Qin, Xiaoming Li, Xi-
+aoguang Han, Tao Yang, and Shihui Guo. Real-world blind
+super-resolution via feature matching with implicit high-
+resolution priors. In Proceedings of the 30th ACM Interna-
+tional Conference on Multimedia , pages 1329–1338, 2022.
+6
+[6] Hanting Chen, Yunhe Wang, Tianyu Guo, Chang Xu, Yiping
+Deng, Zhenhua Liu, Siwei Ma, Chunjing Xu, Chao Xu, and
+Wen Gao. Pre-trained image processing transformer. InPro-
+ceedings of the IEEE/CVF conference on computer vision
+and pattern recognition, pages 12299–12310, 2021. 1
+LR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+Figure 10. Qualitative comparisons between TSD-SR and different diffusion-based methods. Our method can effectively restore the texture
+and details of the corresponding object under challenging degradation conditions. Please zoom in for a better view.
+13
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+LR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+LR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+Figure 11. Qualitative comparisons between TSD-SR and different diffusion-based methods. Our method can effectively restore the texture
+and details of the corresponding object under challenging degradation conditions. Please zoom in for a better view.
+14
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+HR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+LR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+LR
+PASD-20sSUPIR-50sSeeSR-50sZoomed LR
+Ours-1sOSEDiff-1sAddSR-1sSinSR-1s
+Figure 12. Qualitative comparisons between TSD-SR and different diffusion-based methods. Our method can effectively restore the texture
+and details of the corresponding object under challenging degradation conditions. Please zoom in for a better view.
+15
+PSNR:
+24.23
+SSIM:
+0.4737
+PSNR:
+21.99
+SSIM:
+0.3899
+PSNR:
+23.31
+SSIM:
+0.6061
+PSNR:
+21.76
+SSIM:
+0.5121
+Low-Quality Input BSRGAN Ours
+Low-Quality Input BSRGAN Ours
+❌️Prefered by metrics ✔️Prefered by human
+PSNR:
+23.34
+SSIM:
+0.4748
+PSNR:
+18.78
+SSIM:
+0.3897
+PSNR:
+21.56
+SSIM:
+0.5723
+PSNR:
+19.33
+SSIM:
+0.5382
+Low-Quality Input BSRGAN Ours
+Low-Quality Input BSRGAN Ours
+❌️Prefered by metrics ✔️Prefered by human
+PSNR:
+23.29
+SSIM:
+0.5211
+PSNR:
+21.99
+SSIM:
+0.4027
+PSNR:
+19.48
+SSIM:
+0.7352
+PSNR:
+18.55
+SSIM:
+0.6524
+Low-Quality Input Real-ESRGAN Ours
+Low-Quality Input Real-ESRGAN Ours
+❌️Prefered by metrics ✔️Prefered by human
+PSNR:
+20.38
+SSIM:
+0.3504
+PSNR:
+18.46
+SSIM:
+0.3215
+PSNR:
+31.11
+SSIM:
+0.8707
+PSNR:
+28.02
+SSIM:
+0.8598
+Low-Quality Input SinSR Ours
+Low-Quality Input SinSR Ours
+❌️Prefered by metrics ✔️Prefered by human
+PSNR:
+28.61
+SSIM:
+0.7509
+PSNR:
+27.37
+SSIM:
+0.7340
+PSNR:
+26.07
+SSIM:
+0.5064
+PSNR:
+23.72
+SSIM:
+0.4492
+Low-Quality Input ResShift Ours
+Low-Quality Input ResShift Ours
+❌️Prefered by metrics ✔️Prefered by human
+PSNR:
+22.61
+SSIM:
+0.5605
+PSNR:
+20.41
+SSIM:
+0.4397
+PSNR:
+28.46
+SSIM:
+0.8043
+PSNR:
+27.83
+SSIM:
+0.7462
+Low-Quality Input LDL Ours
+Low-Quality Input LDL Ours
+❌️Prefered by metrics ✔️Prefered by human
+Figure 13. Comparisons between full-reference metric assessments and human visual preference. Despite scoring lower on full-reference
+metrics, TSD-SR generates images that align with human preference.
+[7] Keyan Ding, Kede Ma, Shiqi Wang, and Eero P Simoncelli.
+Image quality assessment: Unifying structure and texture
+similarity. IEEE transactions on pattern analysis and ma-
+chine intelligence, 44(5):2567–2581, 2020. 2, 6
+[8] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou
+Tang. Learning a deep convolutional network for image
+super-resolution. In Computer Vision–ECCV 2014: 13th
+European Conference, Zurich, Switzerland, September 6-12,
+2014, Proceedings, Part IV 13 , pages 184–199. Springer,
+2014. 1
+[9] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou
+Tang. Image super-resolution using deep convolutional net-
+works. IEEE transactions on pattern analysis and machine
+intelligence, 38(2):295–307, 2015. 1
+[10] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim
+Entezari, Jonas M ¨uller, Harry Saini, Yam Levi, Dominik
+Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling recti-
+fied flow transformers for high-resolution image synthesis.
+In Forty-first International Conference on Machine Learn-
+ing, 2024. 2, 6
+[11] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing
+Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and
+16
+Algorithm 1: TSD-SR Training Procedure
+Input: D = {xL, xH, cy} , pre-trained Teacher Diffusion Model including V AE encoderEψ, denoising network ϵψ
+and V AE decoderDψ, the number of iterations N and step size s of DASM.
+Output: Trained one-step Student Model Gθ.
+1 Initialize Student Model Gθ, including Eθ ← Eψ with trainable LoRA, ϵθ ← ϵψ with trainable LoRA, Dθ ← Dψ.
+2 Initialize LoRA diffusion network ϵϕ ← ϵψ with trainable LoRA.
+3 while train do
+4 Sample (xL, xH, cy) ∼ D
+/* Network forward */
+5 ˆz ← ϵθ(Eθ(xL)), z ← Eψ(xH)
+6 ˆxH ← Dψ(ˆz)
+/* Compute reconstruction loss */
+7 LRec ← LP IP S(ˆxH, xH)
+/* Compute regularization loss */
+8 Sample ϵ from N(0, I), t from {50, ··· , 950}
+9 σt ← FlowMatchingScheduler(t)
+10 ˆzt ← σtϵ + (1− σt)ˆz, zt ← σtϵ + (1− σt)z
+11 LReg ← LTSD (ˆzt, zt, cy) // Eq. (5)
+12 for i ← 1 to N do
+13 cur ← t − i · s
+14 pre ← t − i · s + s
+15 σcur ← FlowMatchingScheduler(cur)
+16 σpre ← FlowMatchingScheduler(pre)
+17 ˆzcur ← ˆzpre + (σcur − σpre) · ϵϕ(ˆzpre; pre, cy) // Eq. (6)
+18 zcur ← zpre + (σcur − σpre) · ϵψ(zpre; pre, cy)
+19 LReg += weight · LTSD (ˆzcur, zcur, cy)
+20 end
+21 LG ← LRec + γLReg
+22 Update θ with LG
+/* Compute diffusion loss for LoRA Model */
+23 Sample ϵ from N(0, I), t from {50, ··· , 950}
+24 σt ← FlowMatchingScheduler(t)
+25 ˆzt ← σtϵ + (1− σt)stopgrad(ˆz)
+26 LLora ← LDiff (ˆzt, cy) // Eq. (9)
+27 Update ϕ with LLora
+28 end
+Yoshua Bengio. Generative adversarial nets. Advances in
+neural information processing systems, 27, 2014. 1
+[12] Jianping Gou, Baosheng Yu, Stephen J Maybank, and
+Dacheng Tao. Knowledge distillation: A survey. Interna-
+tional Journal of Computer Vision, 129(6):1789–1819, 2021.
+2
+[13] Xiangyu He and Jian Cheng. Revisiting l1 loss in super-
+resolution: a probabilistic view and beyond. arXiv preprint
+arXiv:2201.10084, 2022. 4
+[14] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, and Sepp Hochreiter. Gans trained by a
+two time-scale update rule converge to a local nash equilib-
+rium. Advances in neural information processing systems ,
+30, 2017. 6
+[15] Geoffrey Hinton. Distilling the knowledge in a neural net-
+work. arXiv preprint arXiv:1503.02531, 2015. 2
+[16] Jonathan Ho and Tim Salimans. Classifier-free diffusion
+guidance. arXiv preprint arXiv:2207.12598, 2022. 2
+[17] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising dif-
+fusion probabilistic models. Advances in neural information
+processing systems, 33:6840–6851, 2020. 1
+[18] Andrew G Howard. Mobilenets: Efficient convolutional neu-
+ral networks for mobile vision applications. arXiv preprint
+arXiv:1704.04861, 2017. 2
+[19] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-
+Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen.
+Lora: Low-rank adaptation of large language models. arXiv
+preprint arXiv:2106.09685, 2021. 3
+[20] Tero Karras, Samuli Laine, and Timo Aila. A style-based
+generator architecture for generative adversarial networks.
+17
+In Proceedings of the IEEE/CVF conference on computer vi-
+sion and pattern recognition, pages 4401–4410, 2019. 6
+[21] Bahjat Kawar, Michael Elad, Stefano Ermon, and Jiaming
+Song. Denoising diffusion restoration models. Advances
+in Neural Information Processing Systems, 35:23593–23606,
+2022. 1
+[22] Junjie Ke, Qifei Wang, Yilin Wang, Peyman Milanfar, and
+Feng Yang. Musiq: Multi-scale image quality transformer.
+In Proceedings of the IEEE/CVF international conference on
+computer vision, pages 5148–5157, 2021. 6, 9
+[23] Jiwon Kim, Jung Kwon Lee, and Kyoung Mu Lee. Accurate
+image super-resolution using very deep convolutional net-
+works. In Proceedings of the IEEE conference on computer
+vision and pattern recognition, pages 1646–1654, 2016. 1
+[24] Diederik P Kingma. Auto-encoding variational bayes. arXiv
+preprint arXiv:1312.6114, 2013. 6
+[25] Solomon Kullback and Richard A Leibler. On information
+and sufficiency. The annals of mathematical statistics, 22(1):
+79–86, 1951. 3
+[26] Christian Ledig, Lucas Theis, Ferenc Husz´ar, Jose Caballero,
+Andrew Cunningham, Alejandro Acosta, Andrew Aitken,
+Alykhan Tejani, Johannes Totz, Zehan Wang, et al. Photo-
+realistic single image super-resolution using a generative ad-
+versarial network. In Proceedings of the IEEE conference on
+computer vision and pattern recognition, pages 4681–4690,
+2017. 1, 2
+[27] Yawei Li, Kai Zhang, Jingyun Liang, Jiezhang Cao, Ce Liu,
+Rui Gong, Yulun Zhang, Hao Tang, Yun Liu, Denis Deman-
+dolx, et al. Lsdir: A large scale dataset for image restoration.
+In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pages 1775–1787, 2023. 6
+[28] Jie Liang, Hui Zeng, and Lei Zhang. Details or artifacts:
+A locally discriminative learning approach to realistic im-
+age super-resolution. In Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, pages
+5657–5666, 2022. 6
+[29] Xinqi Lin, Jingwen He, Ziyan Chen, Zhaoyang Lyu, Bo Dai,
+Fanghua Yu, Wanli Ouyang, Yu Qiao, and Chao Dong. Diff-
+bir: Towards blind image restoration with generative diffu-
+sion prior. arXiv preprint arXiv:2308.15070, 2023. 1, 2, 6
+[30] I Loshchilov. Decoupled weight decay regularization. arXiv
+preprint arXiv:1711.05101, 2017. 6
+[31] Simian Luo, Yiqin Tan, Longbo Huang, Jian Li, and Hang
+Zhao. Latent consistency models: Synthesizing high-
+resolution images with few-step inference. arXiv preprint
+arXiv:2310.04378, 2023. 2
+[32] Xiaotong Luo, Yuan Xie, Yanyun Qu, and Yun Fu. Skipdiff:
+Adaptive skip diffusion model for high-fidelity perceptual
+image super-resolution. In Proceedings of the AAAI Con-
+ference on Artificial Intelligence, pages 4017–4025, 2024. 6
+[33] Mehdi Mirza. Conditional generative adversarial nets. arXiv
+preprint arXiv:1411.1784, 2014. 1
+[34] Thuan Hoang Nguyen and Anh Tran. Swiftbrush: One-step
+text-to-image diffusion model with variational score distilla-
+tion. In Proceedings of the IEEE/CVF Conference on Com-
+puter Vision and Pattern Recognition , pages 7807–7816,
+2024. 2
+[35] Dustin Podell, Zion English, Kyle Lacey, Andreas
+Blattmann, Tim Dockhorn, Jonas M ¨uller, Joe Penna, and
+Robin Rombach. Sdxl: Improving latent diffusion mod-
+els for high-resolution image synthesis. arXiv preprint
+arXiv:2307.01952, 2023. 2
+[36] Ben Poole, Ajay Jain, Jonathan T Barron, and Ben Milden-
+hall. Dreamfusion: Text-to-3d using 2d diffusion. arXiv
+preprint arXiv:2209.14988, 2022. 3, 13
+[37] Alec Radford. Unsupervised representation learning with
+deep convolutional generative adversarial networks. arXiv
+preprint arXiv:1511.06434, 2015. 1
+[38] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu,
+and Mark Chen. Hierarchical text-conditional image gener-
+ation with clip latents. arXiv preprint arXiv:2204.06125, 1
+(2):3, 2022. 2
+[39] Geoffrey Roeder, Yuhuai Wu, and David K Duvenaud. Stick-
+ing the landing: Simple, lower-variance gradient estimators
+for variational inference. Advances in Neural Information
+Processing Systems, 30, 2017. 13
+[40] Robin Rombach, Andreas Blattmann, Dominik Lorenz,
+Patrick Esser, and Bj ¨orn Ommer. High-resolution image
+synthesis with latent diffusion models. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 10684–10695, 2022. 1, 2
+[41] Axel Sauer, Dominik Lorenz, Andreas Blattmann, and Robin
+Rombach. Adversarial diffusion distillation. arXiv preprint
+arXiv:2311.17042, 2023. 2
+[42] Yang Song, Jascha Sohl-Dickstein, Diederik P Kingma, Ab-
+hishek Kumar, Stefano Ermon, and Ben Poole. Score-based
+generative modeling through stochastic differential equa-
+tions. arXiv preprint arXiv:2011.13456, 2020. 1
+[43] Radu Timofte, Eirikur Agustsson, Luc Van Gool, Ming-
+Hsuan Yang, and Lei Zhang. Ntire 2017 challenge on single
+image super-resolution: Methods and results. In Proceed-
+ings of the IEEE conference on computer vision and pattern
+recognition workshops, pages 114–125, 2017. 6
+[44] Jianyi Wang, Kelvin CK Chan, and Chen Change Loy. Ex-
+ploring clip for assessing the look and feel of images. InPro-
+ceedings of the AAAI Conference on Artificial Intelligence ,
+pages 2555–2563, 2023. 6, 9
+[45] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, Kelvin CK
+Chan, and Chen Change Loy. Exploiting diffusion prior for
+real-world image super-resolution. International Journal of
+Computer Vision, pages 1–21, 2024. 2, 6
+[46] Xintao Wang, Ke Yu, Shixiang Wu, Jinjin Gu, Yihao Liu,
+Chao Dong, Yu Qiao, and Chen Change Loy. Esrgan: En-
+hanced super-resolution generative adversarial networks. In
+Proceedings of the European conference on computer vision
+(ECCV) workshops, pages 0–0, 2018. 2, 3
+[47] Xintao Wang, Liangbin Xie, Chao Dong, and Ying Shan.
+Real-esrgan: Training real-world blind super-resolution with
+pure synthetic data. In Proceedings of the IEEE/CVF inter-
+national conference on computer vision , pages 1905–1914,
+2021. 1, 2, 3, 6
+[48] Yinhuai Wang, Jiwen Yu, and Jian Zhang. Zero-shot im-
+age restoration using denoising diffusion null-space model.
+arXiv preprint arXiv:2212.00490, 2022. 1
+18
+[49] Yufei Wang, Wenhan Yang, Xinyuan Chen, Yaohui Wang,
+Lanqing Guo, Lap-Pui Chau, Ziwei Liu, Yu Qiao, Alex C
+Kot, and Bihan Wen. Sinsr: diffusion-based image super-
+resolution in a single step. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition ,
+pages 25796–25805, 2024. 2, 6
+[50] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P Si-
+moncelli. Image quality assessment: from error visibility to
+structural similarity. IEEE transactions on image processing,
+13(4):600–612, 2004. 6
+[51] Zhengyi Wang, Cheng Lu, Yikai Wang, Fan Bao, Chongxuan
+Li, Hang Su, and Jun Zhu. Prolificdreamer: High-fidelity and
+diverse text-to-3d generation with variational score distilla-
+tion. Advances in Neural Information Processing Systems ,
+36, 2024. 2, 3
+[52] Pengxu Wei, Ziwei Xie, Hannan Lu, Zongyuan Zhan, Qixi-
+ang Ye, Wangmeng Zuo, and Liang Lin. Component divide-
+and-conquer for real-world image super-resolution. In Com-
+puter Vision–ECCV 2020: 16th European Conference, Glas-
+gow, UK, August 23–28, 2020, Proceedings, Part VIII 16 ,
+pages 101–117. Springer, 2020. 6, 9
+[53] Rongyuan Wu, Lingchen Sun, Zhiyuan Ma, and Lei Zhang.
+One-step effective diffusion network for real-world image
+super-resolution. arXiv preprint arXiv:2406.08177, 2024. 2,
+3, 4, 6, 9
+[54] Rongyuan Wu, Tao Yang, Lingchen Sun, Zhengqiang Zhang,
+Shuai Li, and Lei Zhang. Seesr: Towards semantics-
+aware real-world image super-resolution. In Proceedings of
+the IEEE/CVF conference on computer vision and pattern
+recognition, pages 25456–25467, 2024. 1, 2, 6
+[55] Rui Xie, Ying Tai, Kai Zhang, Zhenyu Zhang, Jun Zhou,
+and Jian Yang. Addsr: Accelerating diffusion-based blind
+super-resolution with adversarial diffusion distillation.arXiv
+preprint arXiv:2404.01717, 2024. 2, 6, 9, 11
+[56] Sidi Yang, Tianhe Wu, Shuwei Shi, Shanshan Lao, Yuan
+Gong, Mingdeng Cao, Jiahao Wang, and Yujiu Yang.
+Maniqa: Multi-dimension attention network for no-reference
+image quality assessment. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition ,
+pages 1191–1200, 2022. 6
+[57] Tao Yang, Rongyuan Wu, Peiran Ren, Xuansong Xie, and
+Lei Zhang. Pixel-aware stable diffusion for realistic image
+super-resolution and personalized stylization. arXiv preprint
+arXiv:2308.14469, 2023. 1, 2, 6
+[58] Junho Yim, Donggyu Joo, Jihoon Bae, and Junmo Kim. A
+gift from knowledge distillation: Fast optimization, network
+minimization and transfer learning. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 4133–4141, 2017. 2
+[59] Tianwei Yin, Micha ¨el Gharbi, Taesung Park, Richard Zhang,
+Eli Shechtman, Fredo Durand, and William T Freeman. Im-
+proved distribution matching distillation for fast image syn-
+thesis. arXiv preprint arXiv:2405.14867, 2024. 2
+[60] Tianwei Yin, Micha ¨el Gharbi, Richard Zhang, Eli Shecht-
+man, Fredo Durand, William T Freeman, and Taesung Park.
+One-step diffusion with distribution matching distillation. In
+Proceedings of the IEEE/CVF Conference on Computer Vi-
+sion and Pattern Recognition, pages 6613–6623, 2024. 2
+[61] Fanghua Yu, Jinjin Gu, Zheyuan Li, Jinfan Hu, Xiangtao
+Kong, Xintao Wang, Jingwen He, Yu Qiao, and Chao Dong.
+Scaling up to excellence: Practicing model scaling for photo-
+realistic image restoration in the wild. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pages 25669–25680, 2024. 1, 2, 6, 11
+[62] Zongsheng Yue, Jianyi Wang, and Chen Change Loy.
+Resshift: Efficient diffusion model for image super-
+resolution by residual shifting. Advances in Neural Infor-
+mation Processing Systems, 36, 2024. 2, 6
+[63] Kai Zhang, Jingyun Liang, Luc Van Gool, and Radu Timo-
+fte. Designing a practical degradation model for deep blind
+image super-resolution. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 4791–
+4800, 2021. 1, 2, 3, 6
+[64] Lin Zhang, Lei Zhang, and Alan C Bovik. A feature-enriched
+completely blind image quality evaluator.IEEE Transactions
+on Image Processing, 24(8):2579–2591, 2015. 6, 9
+[65] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding
+conditional control to text-to-image diffusion models. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision, pages 3836–3847, 2023. 2
+[66] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shecht-
+man, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE conference on computer vision and pattern recogni-
+tion, pages 586–595, 2018. 2, 3, 6
+[67] Xindong Zhang, Hui Zeng, Shi Guo, and Lei Zhang.
+Efficient long-range attention network for image super-
+resolution. In European conference on computer vision ,
+pages 649–667. Springer, 2022. 1
+[68] Yuehan Zhang, Bo Ji, Jia Hao, and Angela Yao. Perception-
+distortion balanced admm optimization for single-image
+super-resolution. In European Conference on Computer Vi-
+sion, pages 108–125. Springer, 2022. 6
+19

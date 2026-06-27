@@ -795,7 +795,7 @@ def main(config_path):
     )
 
     tea_ckpt_path = getattr(args, 'teacher_ckpt', None)
-    if tea_ckpt_path is not None:
+    if tea_ckpt_path is not None and str(tea_ckpt_path).strip() not in ("", "~", "None", "null"):
         from safetensors.torch import load_file as _load_file
         if tea_ckpt_path.endswith(".safetensors"):
             tea_state_dict = _load_file(tea_ckpt_path)
@@ -804,12 +804,18 @@ def main(config_path):
         load_model_weights_with_interpolation(accelerator, model_tea, tea_state_dict, model_name="Teacher Model")
         if accelerator.is_main_process:
             print(f'=======> Loaded teacher weights from {tea_ckpt_path}')
-    
-    model_tea = model_tea.to(accelerator.device)
-    model_tea.eval()
-    requires_grad(model_tea, False)
+        model_tea = model_tea.to(accelerator.device)
+        model_tea.eval()
+        requires_grad(model_tea, False)
+    else:
+        # GT-supervised finetune (paper-style): no external teacher -> the distill
+        # loss's _teacher_target falls back to the GT velocity target (eps-hq).
+        del model_tea
+        model_tea = None
+        if accelerator.is_main_process:
+            print('=======> No teacher_ckpt -> GT-supervised mode (model_tea=None)')
 
-    if accelerator.is_main_process:
+    if accelerator.is_main_process and model_tea is not None:
         tea_total_params = sum(p.numel() for p in model_tea.parameters())
         logger.info(f"===========> Teacher parameters: {tea_total_params} ({tea_total_params / 1e9:.3f} B)")
 
@@ -1300,7 +1306,13 @@ def main(config_path):
             gt_boxes = batch.get("gt_boxes") if isinstance(batch, dict) else None
             gt_texts = batch.get("gt_texts") if isinstance(batch, dict) else None
             with torch.no_grad():
-                _, lq = degradation.degrade_process(hq, resize_bak=True)
+                real_lq = batch.get("lq") if isinstance(batch, dict) else None
+                if real_lq is not None:
+                    # Real-CE real-paired finetune: use the registered real LQ
+                    # (e.g. 13mm) instead of synthesizing it from the GT.
+                    lq = real_lq.to(accelerator.device, non_blocking=True)
+                else:
+                    _, lq = degradation.degrade_process(hq, resize_bak=True)
                 hq, lq = hq*2-1, lq*2-1
                 lq_image_m11 = lq
                 hq_repa = hq.detach() if repa_projector is not None else None

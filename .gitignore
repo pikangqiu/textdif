@@ -37,3 +37,7 @@ index.html*
 
 # local-only server credentials
 doc/SERVERS.private.md
+
+# paper reference PDFs (large, public arXiv; index kept in paper/sources/README.md)
+paper/sources/*.pdf
+preset/realce_ckpts/

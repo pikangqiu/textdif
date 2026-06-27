@@ -1,0 +1,137 @@
+# 1.4B one-step shortcut distillation, joint 2a+2d OCR supervision.
+# Derived 1:1 from the 0.5B champion recipe
+#   text_distill_ablation/VOSR_0.5B_text_guided_target_no_rc_ocr_repa_realctc.yml
+# Only the model scale / VAE / REPA-encoder / teacher are swapped to the 1.4B stack;
+# the dataset (text_hr_512) and both OCR loss branches are byte-for-byte identical so
+# this is a clean 1.4B-vs-0.5B comparison. Runs on 199 in /data2/wyw/ywk/VOSR_textsr.
+# 199-correct paths: SA crops live at /data2/wyw/ywk/datastes/SA, indexed by
+# configs/train_txt/sa_remote_dataset.txt (same sa_*_crop_*.jpg basenames as local,
+# so the GT-box index matches). inference_steps:1 -> (global_step % 1 == 1) is never
+# true -> periodic eval disabled, so test_*_dir are never actually read.
+train_dataset_config: configs/train_txt/sa_remote_dataset.txt
+suffix: '_1p4b_codsr_2a2d'
+
+test_lq_dir: /data2/wyw/ywk/datastes/SA/images
+test_gt_dir: /data2/wyw/ywk/datastes/SA/images
+test_upscale: 4
+
+infer_steps: 1
+resolution: 512
+
+# effbs = train_batch_size x grad_accum = 16 (== 0.5B champion). This codebase
+# SPLITS train_batch_size across GPUs, so train_batch_size MUST be >= #GPUs
+# (bs2 on 4 GPUs -> 2//4=0 -> crash). 4 GPUs: bs4 -> per-device 1 (memory-safe
+# for 1.4B + full-512 qwen OCR decode, ~46GB/80GB), accum 4 keeps effbs 16,
+# ~2x faster than the 2-GPU/accum8 setup.
+train_batch_size: 4
+gradient_accumulation_steps: 4
+dataloader_num_workers: 2
+dataloader_pin_memory: False
+dataloader_persistent_workers: False
+dataloader_prefetch_factor: 2
+
+patch_size: 2
+mlp_ratio: 4
+use_qknorm: True
+use_swiglu: True
+use_rope: True
+use_rmsnorm: True
+wo_shift: False
+
+# ---- 1.4B architecture ----
+dim: 1536
+depth: 36
+num_heads: 24
+use_8bit_adam: False
+
+# ---- Qwen-Image f8c16 VAE (matches the 1.4B teacher's latent space) ----
+ae_type: qwen
+ae_path: preset/ckpts/Qwen-Image-vae-2d
+
+learning_rate: 5.0e-6
+max_train_steps: 20000
+checkpointing_steps: 1000
+inference_steps: 1
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 1.0e-2
+adam_epsilon: 1.0e-08
+max_grad_norm: 1.0
+lr_scheduler: constant_with_warmup
+lr_warmup_steps: 0
+lr_num_cycles: 1
+
+use_ema: True
+mixed_precision: bf16
+tracker_project_name: vosr_text_1.4B_distill_codsr_2a2d
+seed: 42
+ema_decay: 0.9999
+
+time_dist: ['uniform', 0, 1.0]
+
+cfg_ratio: 0.0
+cfg_scale: 0.5
+
+# 1.4B teacher (fm, ms_from_pretrained, ckpt-40000 EMA; CharAcc 65.63 on 847).
+# Student is initialised from the same fm weights, then distilled to NFE=1.
+teacher_ckpt: preset/ckpts/teacher_1p4b_ms_40000.safetensors
+pretrained_ckpt: preset/ckpts/teacher_1p4b_ms_40000.safetensors
+
+weak_cond_strength_aelq: 0.1
+weak_cond_strength_aelq_list: [0.05, 0.25]
+cond_strength_aelq_list: [5, 1]
+
+# ---- REPA encoder must match the 1.4B teacher (dinov2l / z_dim 1024 / layer 17) ----
+dinov2_size: 448
+enc_type: dinov2l
+enc_dim: 1024
+layer_dinov2b_list: [17]
+
+interp_type: lin
+
+u_weight: 0.0
+a: 1.0
+b: 1.0
+
+use_pos: False
+train_steps: 2
+encdim_ratio: 3
+t_start: 0
+t_end: 1
+resume_ckpt: ~
+distill_type: shortcut
+
+# Gradient-checkpoint the student DiT blocks so the full-512 qwen VAE decode for the
+# OCR losses fits one GPU at per-GPU batch 2.
+use_checkpoint: True
+
+# ---- Joint 2a+2d OCR supervision (identical to the 0.5B champion) ----
+ocr_use_gt_boxes: True
+ocr_boxes_index_path: /data2/wyw/ywk/VOSR_textsr/text_boxes_index.pkl
+
+# 2a feature-alignment branch
+ocr_repa_weight: 0.5
+ocr_repa_interval: 1
+ocr_repa_start_step: 0
+ocr_repa_on_sync_only: True
+ocr_repa_loss_type: cosine
+
+# 2d real GT-text CTC branch
+ocr_real_ctc_weight: 0.5
+ocr_real_ctc_interval: 1
+ocr_real_ctc_start_step: 0
+ocr_real_ctc_on_sync_only: True
+
+# shared recognizer / crop settings
+ocr_repa_rec_algorithm: CRNN
+ocr_repa_rec_image_shape: "3,32,320"
+ocr_repa_max_boxes: 16
+ocr_repa_min_box_size: 8
+
+logging_dir: logs
+report_to: tensorboard
+output_dir: exp_vosr_text_distill_ablation/
+log_loss_steps: 10
+
+dataset_type: 'txt'
+shuffle_buffer: 2000

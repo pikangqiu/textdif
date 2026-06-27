@@ -1,0 +1,128 @@
+train_dataset_config: configs/train_txt/realce_tiles_only_dataset.txt
+suffix: '_realce_2a_tiles'
+
+test_lq_dir: /data/ywk/datasets/real_test/LQ
+test_gt_dir: /data/ywk/datasets/real_test/HR
+test_upscale: 4
+
+infer_steps: 1
+resolution: 512
+
+train_batch_size: 4
+gradient_accumulation_steps: 4
+dataloader_num_workers: 2
+dataloader_pin_memory: False
+dataloader_persistent_workers: False
+dataloader_prefetch_factor: 2
+
+patch_size: 2
+mlp_ratio: 4
+use_qknorm: True
+use_swiglu: True
+use_rope: True
+use_rmsnorm: True
+wo_shift: False
+
+dim: 1024
+depth: 28
+num_heads: 16
+use_8bit_adam: False
+
+ae_type: sd2
+ae_path: preset/ckpts/stable-diffusion-2-1-base
+lwdecoder_path: preset/ckpts/sd21_lwdecoder.pth
+
+learning_rate: 5.0e-5
+max_train_steps: 8000
+checkpointing_steps: 1000
+inference_steps: 1
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 1.0e-2
+adam_epsilon: 1.0e-08
+max_grad_norm: 1.0
+lr_scheduler: constant_with_warmup
+lr_warmup_steps: 0
+lr_num_cycles: 1
+
+use_ema: True
+mixed_precision: bf16
+tracker_project_name: vosr_realce_2a_tiles
+seed: 42
+ema_decay: 0.9999
+
+time_dist: ['uniform', 0, 1.0]
+
+cfg_ratio: 0.0
+cfg_scale: 0.5
+
+teacher_ckpt: ~
+pretrained_ckpt: exp_vosr_text_distill_ablation/ldit_distill_bs016_sd2f8c4_size512_ps2_psr1_d1024_b28_h16_uw0.0_cfgs0.5-r0.0-wc0.05-0.25_ts0e1_edr3_tduni_typetxt_distshortcut_text_ablation_guided_target_no_rc_ocr_repa_realctc/checkpoints/checkpoint-00018000/clean_weights/ema_model.safetensors
+
+weak_cond_strength_aelq: 0.1
+weak_cond_strength_aelq_list: [0.05, 0.25]
+cond_strength_aelq_list: [5, 1]
+
+dinov2_size: 448
+enc_type: dinov2b
+enc_dim: 768
+layer_dinov2b_list: [8]
+
+interp_type: lin
+
+u_weight: 0.0
+a: 1.0
+b: 1.0
+
+use_pos: False
+train_steps: 2
+encdim_ratio: 3
+t_start: 0
+t_end: 1
+resume_ckpt: ~
+distill_type: shortcut
+
+# Gradient-checkpoint the student DiT blocks so the full-512 VAE decode for the
+# OCR losses fits a 24GB GPU at per-GPU batch 1 (same as 2a / 2b / 2d).
+use_checkpoint: True
+
+# Joint experiment 2a+2d: combine the two ORTHOGONAL student-side OCR signals that
+# each lift BOTH detection F1 and CharAcc on their own:
+#   - 2a  ocr_repa_weight     : local-crop OCR FEATURE alignment (region CRNN-feature
+#                               cosine between prediction and HR, GT boxes).
+#   - 2d  ocr_real_ctc_weight : OCR OUTPUT-space glyph supervision (CTC of the
+#                               prediction crops against the REAL annotated GT text).
+# Same GT boxes / recognizer / weight / interval / sync gating as the singletons, so
+# this is a clean additive-combination test (feature-space + output-space). Both loss
+# blocks in train_vosr_distill.py gate independently on their own weight, so enabling
+# both here activates both with no code change. They share the single pred VAE decode.
+ocr_use_gt_boxes: True
+ocr_boxes_index_path: /data/ywk/datasets/Real-CE/curation/realce_tile_boxes_index.pkl
+
+# 2a feature-alignment branch
+ocr_repa_weight: 0.5
+ocr_repa_interval: 1
+ocr_repa_start_step: 0
+ocr_repa_on_sync_only: True
+ocr_repa_loss_type: cosine
+
+# 2d real GT-text CTC branch
+ocr_real_ctc_weight: 0.0
+ocr_real_ctc_interval: 1
+ocr_real_ctc_start_step: 0
+ocr_real_ctc_on_sync_only: True
+
+# shared recognizer / crop settings
+ocr_repa_rec_algorithm: CRNN
+ocr_repa_rec_image_shape: "3,32,320"
+ocr_repa_max_boxes: 16
+ocr_repa_min_box_size: 8
+
+logging_dir: logs
+report_to: tensorboard
+output_dir: exp_vosr_text_distill_ablation/
+log_loss_steps: 10
+
+dataset_type: 'txt'
+shuffle_buffer: 2000
+real_paired_lq_dir: /data/ywk/datasets/Real-CE/curation/realce_tiles/lr

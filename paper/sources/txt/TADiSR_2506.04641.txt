@@ -1,0 +1,710 @@
+arXiv:2506.04641v1  [cs.CV]  5 Jun 2025
+Text-Aware Real-World Image Super-Resolution via
+Diffusion Model with Joint Segmentation Decoders
+Qiming Hu1,2, Linlong Fan2, Yiyan Luo2, Yuhang Yu2, Xiaojie Guo1∗, Qingnan Fan2∗
+1College of Intelligence and Computing, Tianjin University
+2vivo Mobile Communication Co. Ltd
+huqiming@tju.edu.cn fanlinlong703@163.com luoxiaohei333@gmail.com
+yuyuhang@vivo.com xj.max.guo@gmail.com fqnchina@gmail.com
+Figure 1: Left: visual comparison between SR results on real-world samples. Our method shows a
+clear advantage in restoring text structures over previous GAN-based [32, 4], diffusion-based [35, 34]
+, and text image SR [12, 46] methods. Right: cross-attention to the word “text” before and after LoRA
+fine-tuning with joint segmentation decoders, showing improved ability to perceive text regions.
+Abstract
+The introduction of generative models has significantly advanced image super-
+resolution (SR) in handling real-world degradations. However, they often incur
+fidelity-related issues, particularly distorting textual structures. In this paper, we
+introduce a novel diffusion-based SR framework, namely TADiSR, which integrates
+text-aware attention and joint segmentation decoders to recover not only natural
+details but also the structural fidelity of text regions in degraded real-world images.
+Moreover, we propose a complete pipeline for synthesizing high-quality images
+with fine-grained full-image text masks, combining realistic foreground text regions
+with detailed background content. Extensive experiments demonstrate that our
+approach substantially enhances text legibility in super-resolved images, achieving
+state-of-the-art performance across multiple evaluation metrics and exhibiting
+strong generalization to real-world scenarios. Our code is available at here.
+1 Introduction
+Real-world image super-resolution (Real-SR) is a challenging task that aims to recover high-resolution
+(HR) images from low-resolution (LR) inputs affected by unknown and coupled degradation factors
+encountered in real scenarios. In recent years, generative models such as Generative Adversarial
+∗Corresponding authors.
+This work was completed during an internship at vivo.
+Networks (GANs) [ 32, 14, 21, 4] and Diffusion Models [ 42, 29, 39, 35, 41, 16, 34] have been
+introduced into Real-SR, leveraging generative priors to hallucinate missing details lost due to
+degradation. Generative models can produce visually realistic images, but often sacrifice structural
+accuracy for perceptual quality, raising concerns about the trade-off between fidelity and realism [17].
+One of the most prominent issues arises in textual content, particularly in languages with complex
+stroke structures such as Chinese [12]. As illustrated on the left side of Fig. 1, previous generative
+models often struggle to perceive and preserve textual structure in reconstructed images, resulting in
+severe distortions such as malformed strokes or incorrect characters. These issues not only degrade
+user experience but also hinder downstream applications that depend on accurate text restoration.
+To accurately restore text structures degraded in real-world images, we propose to fine-tune the
+cross-attention mechanism between text and image tokens in a pre-trained diffusion model. As shown
+in Fig. 1 (right), we visualize the cross-attention response to the word “text” using DAAM [25] and
+observe that the original model fails to attend properly to text regions. However, by introducing a
+LoRA-based fine-tuning strategy [11] with a joint image super-resolution and text segmentation task,
+the model learns to focus its cross-attention on textual areas. These cross-attention maps, after a
+linear projection, are fed into a dedicated text segmentation decoder to produce high-quality text
+masks. This observation leads to two key insights: (1) LoRA fine-tuning can effectively guide the
+cross-attention of diffusion models toward previously under-attended semantic categories; and (2)
+text-aware super-resolution and text segmentation are highly complementary and can be unified in a
+multi-task learning framework. Based on these insights, we propose TADiSR (Text-Aware Diffusion
+model for real-world image Super-Resolution), which replaces the standard V AE image decoder with
+a joint image–text segmentation decoder, dubbed joint segmentation decoders. The decoders take as
+input the cross-attention response together with the denoised latents, conducting image-segmentation
+interactions through a multi-scale, dual-stream manner. TADiSR can significantly enhance the
+fidelity of text regions in super-resolved images while preserving general image quality. Compared to
+previous text image super-resolution approaches [19, 12, 46], which rely on OCR-based text region
+detection, regional text image super-resolution, background image super-resolution, and further
+fusion, our method produces final outputs in a single pass, making it more suitable for practical use.
+Based on the above analysis, a dataset that contains both accurate text segmentation masks and high-
+quality background scenes is essential for advancing text-aware image super-resolution. However, no
+existing dataset fully satisfies these requirements. Existing text segmentation datasets, such as TextSeg
+[37] and BTS [38], mainly contain cropped text regions with limited background detail and possible
+degradation, and most are restricted to English, except for the bilingual BTS. General-purpose
+super-resolution datasets such as DIV2K [ 1], Flicker2K [ 27], and LSDIR [ 13] offer rich image
+details but contain limited text content and lack any form of text region annotation. Scene text image
+super-resolution datasets like Real-CE [18] typically provide both low-resolution and high-resolution
+image pairs in text-rich scenarios, but they are often small in scale and do not include ground-truth
+text segmentation masks. To address this gap, we introduce a novel data synthesis pipeline that
+constructs a full-image text image super-resolution dataset. We first apply a text segmentation model,
+fine-tuned on a bilingual dataset, to large-scale text recognition datasets to extract a diverse set of
+segmented text patches. These patches are filtered using an OCR model to ensure segmentation
+accuracy. We then apply a super-resolution model to restore the original quality of these patches
+and paste them randomly onto high-quality background images drawn from existing general-purpose
+super-resolution datasets. This process yields our Full-image Text image Super-Resolution (FTSR)
+dataset, which contains accurate foreground text masks and rich background details.
+Our main contributions are summarized as follows:
+• We propose TADiSR, a text-aware diffusion-based super-resolution framework that jointly
+performs image super-resolution and text segmentation. By incorporating a text-aware
+cross-attention fine-tuning mechanism and joint segmentation decoders, TADiSR effectively
+enhances text perception and structural fidelity in real-world degraded scenes.
+• We propose a scalable data synthesis pipeline for text-aware image super-resolution, enabling
+the construction of the FTSR dataset with accurate text masks and backgrounds with rich
+details. The dataset is easily extendable with additional text-oriented images.
+• Extensive experiments demonstrate that our approach significantly outperforms prior state-
+of-the-art models in both qualitative and quantitative evaluations in both synthetic and
+real-world scenarios, especially in preserving text structure fidelity.
+2
+2 Related Work
+Real-World Image Super-Resolution.Real-world image super-resolution (Real-SR) builds upon
+blind SR by modeling complex, composite degradations that occur in uncontrolled environments.
+Early methods such as BSRGAN [44] and Real-ESRGAN [32] simulate diverse degradation processes
+through randomized application orders or multi-stage pipelines, and employ adversarial training
+to generate visually realistic outputs. Despite their success in producing natural-looking images,
+GAN-based approaches often fail to accurately recover fine details, especially structural elements
+like textures and text, due to their limited ability to capture high-level semantics and unstable training
+dynamics. Recent advances in generative modeling have introduced diffusion-based methods to
+Real-SR [35, 42, 16], offering improved stability and generative fidelity, yet challenges remain in
+accurately restoring complex structures, particularly in text-heavy scenarios. ResShift [42] accelerates
+the denoising sampling of LDM [23] by progressively shifting residuals between LR and HR images
+during forward propagation. StableSR [ 29] introduces time-aware encoders, controllable feature
+wrapping, and novel sampling strategies to fine-tune pre-trained diffusion models, circumventing
+expensive training costs. SinSR [33] proposes deterministic sampling and consistency-preserving dis-
+tillation to compress ResShift’s sampling into single-step execution. DiffBIR [16] decomposes blind
+restoration into degradation removal and detail enhancement stages with adaptive fidelity-generation
+balance based on regional detail richness. PASD [39] employs ControlNet with degradation-cleaned
+pixel-domain inputs to enhance pixel-level fidelity. SeeSR [35] develops a degradation-robust tag
+model generating semantic prompts to improve semantic fidelity in real-world SR. SupIR [41] intro-
+duces large-scale high-quality image-text pairs and degradation-robust encoders for latent alignment,
+complemented by Trimmed ControlNet for efficient restoration control. Wu et al. [34] proposed
+OSEDiff, which directly takes low-resolution images as the starting point for diffusion, and the
+variational score distillation is applied in the latent space to assure one-step sampling. Despite notable
+improvements in realism and fidelity for general content, these methods often overlook or distort text,
+due to insufficient sensitivity to character-level structures.
+Text Image Super-Resolution.Text image super-resolution (Text-SR) aims to enhance the legibility
+of textual content, often by processing cropped image patches containing isolated words or lines.
+Early approaches, such as those by Dong et al.[6], applied general SR techniques like SRCNN [5] to
+improve OCR performance on low-resolution inputs. TextSR [31] integrates text recognizers into
+GAN architectures where text recognition loss is backpropagated to guide the generation of legible
+characters. PlugNet [20] embedded SR units into text recognition training, sharing the backbone to
+enable more discriminative representations under degraded conditions. TSRN [30] incorporated edge-
+aware modules and introduced the TextZoom dataset to better simulate real-world text degradation via
+varying camera focal lengths. Transformer-based methods have further advanced the field. STT [2]
+leveraged global attention and a dedicated text recognition head to sharpen textual features through
+position and content-aware losses. TATT [19] proposed a global attention module within CNNs to
+better handle irregular text layouts. More recent efforts have leveraged powerful generative priors to
+advance Text-SR: MARCONet [12] combines Transformer backbones with codebooks and StyleGAN
+priors to recover diverse character styles, while DiffTSR [ 46] introduced a dual-stream diffusion
+model that denoises pure text and text image components, respectively, interacting features via a
+Mixture-of-Modality mechanism. Although these methods achieve state-of-the-art performance on
+cropped text regions, they struggle to generalize to full images, especially when faced with multi-line,
+vertical, long, and complex layout text. These methods typically require additional models and
+complex processing steps to achieve text-aware full-image super-resolution. This highlights the need
+for a unified and practical solution for full-image text image super-resolution. Furthermore, these
+works demonstrate the mutual benefits between text image super-resolution and text recognition
+tasks, suggesting the potential of multi-task learning frameworks. By extending this insight to the
+full-image solution, our approach integrates text-aware super-resolution and text segmentation into a
+unified diffusion-based architecture that directly processes whole images.
+3 Methodology
+3.1 Overall Architecture
+The overall architecture of the proposed TADiSR model is illustrated in Fig. 2. Built upon the Latent
+Diffusion Model (LDM) framework [ 23], TADiSR introduces two key components, Text-Aware
+3
+Figure 2: Overall architecture of the proposed TADiSR model. Text-aware cross-attention responses
+to the word “text” are extracted from the denoising U-Net of the LDM. A Text Segmentation Decoder
+is introduced, which takes the linearly projected cross-attention response as input and is jointly trained
+from scratch with the original V AE decoder via Cross-Decoder Interaction Blocks (CDIB), forming
+the Joint Segmentation Decoders. This design enables simultaneous generation of super-resolved
+images and text segmentation maps. LoRA adapters are applied to fine-tune the U-Net (including
+cross-attention layers) and the V AE decoder. The detailed structure of CDIB is depicted on the right.
+Cross-Attention and Joint Segmentation Decoders, to equip the diffusion model with fine-grained
+text perception capabilities.
+Given a degraded low-resolution image xL and the fixed text prompt y, the LR image is encoded
+by the V AE encoderEθ into a latent representation zL = Eθ(xL), while the prompt is processed
+by the text encoder Pθ to obtain the contextual embedding cy = Pθ(y). We denote the embedding
+slice corresponding to the keyword “text” as ctex. Here, θ represents the parameters of the pre-trained
+backbone, and ϕ denotes the LoRA fine-tuned parameters. During the diffusion process, the latent
+representation zL is denoised by the U-Net backbone to produce the latent ˆzH by one step:
+ˆzH = (zL − βt ˆn)/αt, with ˆn = Uϕ(zL; t, cy), (1)
+where αt and βt are scalars determined by the predefined diffusion time step t. The noise estimation
+ˆn is predicted by the denoising U-Net Uϕ. In parallel, the cross-attention maps that respond to ctex
+are linearly projected and fed, along with ˆzH, into the Joint Segmentation Decoders. The decoders
+yield two predictions: a high-quality super-resolved image ˆxH and a text segmentation mask ˆs. The
+following two subsections detail the design of the text-aware cross-attention mechanism and the
+structure of our joint segmentation decoders.
+3.2 Text-Aware Cross-Attention
+In LDM, the cross-attention mechanism [28] is used within the intermediate layers of the U-Net to
+inject textual conditions into the visual feature stream. It is defined as:
+CA(q, k, v) =softmax(q × kT
+√
+d
+) × v, with q = Wq × z, k = Wk × cy, v = Wv × cy, (2)
+where Wq, Wk, and Wv are learnable linear projection matrices, × denotes matrix multiplication, z
+represents intermediate image latent in the U-Net. q, k, and v are the query, key, and value matrices,
+respectively, with a dimensionality of d.
+We enhance the textual content awareness of LDM by guiding the attention responses corresponding
+specifically to the keyword “text” in the prompt to the text regions. This is done by locating the token
+slice ctex in cy that aligns with the word “text”, and retrieving its associated attention response in
+each cross-attention map am = qm × (km)T across all M cross-attention layers:
+a1...M
+tex = [a1
+tex, ...,am
+tex, ...,aM
+tex], with am
+tex = Search(am, ctex), (3)
+where m ∈ {1...M} represents the index of cross-attention layers in the U-Net, and Search(·)
+retrieves the attention slice associated with ctex.
+4
+These responses are concatenated along the token channel via Concat(·) and passed through a linear
+projection to match the latent dimension of the denoised image code ˆzH:
+atex = Wa × Concat(a1...M
+tex ), (4)
+where Wa is the learnable projection matrix. The resulting atex is subsequently fed, together with ˆzH,
+into the Joint Segmentation Decoders for further joint text segmentation and image super-resolution.
+3.3 Joint Segmentation Decoders
+To enable multi-task learning for both text-aware image super-resolution and text segmentation, we
+introduce Joint Segmentation Decoders. Specifically, in addition to the original V AE image decoder
+Dv
+ϕ in LDM, we design a symmetric Text Segmentation Decoder Ds
+φ. These two decoders jointly
+decode the denoised image latent ˆzH and the aggregated text-aware cross-attention atex, obtaining
+ˆxH (super-resolved image) and ˆs (text segmentation mask) by:
+ˆxH = Dv
+ϕ(ˆzH), ˆs = Ds
+φ(atex), (5)
+where ϕ denotes LoRA fine-tuned parameters and φ are randomly initialized. Interaction between
+the two decoders is facilitated via the proposed Cross-Decoder Interaction Block (CDIB), defined as:
+ˆzi
+H, ai
+tex = CDIBi(ˆzi−1
+H , ai−1
+tex ), (6)
+where i ∈ {1, ..., N} indexes the CDIB layers, ˆzi
+H and ai
+tex denote the image and text segmentation
+features at the i-th layer, respectively.
+The structure of the proposed CDIB is illustrated in Fig. 2 (right). CDIB consists of two branches:
+the Image Branch, which is inserted into the intermediate layers of the V AE image decoder, and the
+Text Segmentation (TextSeg.) Branch, which is inserted into the corresponding layers of the Text
+Segmentation Decoder. The input features ˆzi−1
+H and ai−1
+tex first pass through two ResBlocks [9]. The
+resulting features are then processed via a 1x1 convolution and split along the channel dimension.
+One half is used for within-branch propagation, while the other half is prepared for cross-decoder
+feature interaction. The exchanged features are passed through a Sigmoid activation and interact
+with the forward features using Hadamard product, similar in spirit to GLU [ 24], but applied in a
+dual-stream setting. The interaction results are then processed by GroupNorm [36], SiLU activation
+[8], and another 1x1 convolution to produce the final feature maps for each branch. To stabilize
+training, a skip connection is introduced between the input and output of each branch, with a learnable
+scaling factor initialized to zero for the residual part.
+3.4 Loss Function
+SR-oriented Loss.For the image super-resolution part in our multi-task learning framework, we
+constrain the reconstruction loss between the predicted high-resolution image ˆxH and the ground
+truth high-resolution image xH using a weighted sum of MSE, LPIPS, and modified Focal losses:
+ℓimg := ∥ˆxH − xH∥2
+2 + λ1 · LPIPS(ˆxH, xH) +λ2 · ℓmf, (7)
+where ∥·∥ 2 denotes the ℓ2 norm, and λ1 = 5.0, λ2 = 10.0 are balancing coefficients for different loss
+terms. To enhance the correlation between text structure preservation during image super-resolution
+and text segmentation, we modify the focal loss [15] by emphasizing hard boundary pixels during
+image super-resolution guided by segmentation predictions and ground-truths:
+ℓmf := ∥[1 − ˆs ◦ s − (1 − ˆs) ◦ (1 − s)]γ ◦ (∇ˆxH − ∇xH)2∥1, (8)
+where ˆs ◦ s + (1 − ˆs) ◦ (1 − s) represents the probability of correct classification for each pixels,
+and γ is a hyperparameter adjusting the weight factor. ◦ denotes the pixel-wise multiplication. ∥ · ∥1
+means the ℓ1 norm. ∇ denotes the Sobel edge operator [22]. Edge pixels with high probability of
+correct classification receive lower weights, whereas those with lower probability receive higher
+weights, ensuring more attention is given to challenging text structure pixels during image super-
+resolution. This loss term reinforces the structural accuracy of text regions and strengthens the
+inter-task relationships in our multi-task learning framework.
+Segmentation-oriented loss.For the segmentation prediction ˆs and its ground-truth s, we employ a
+combination of MSE, Focal and Dice Losses, which are commonly used in segmentation tasks [40]:
+ℓseg := ∥ˆs − s∥2
+2 + λ3 · FocalLoss(ˆs, s) +λ4 · DiceLoss(ˆs, s). (9)
+where λ3 = 10.0, λ4 = 1.0. The total loss function is formulated as the sum of the above components:
+ℓtot = ℓimg + ℓseg, enabling simultaneous learning across both domains for mutual enhancement.
+5
+Table 1: Quantitative results on the test set of our proposed FTSR dataset and the validation set of the
+Real-CE dataset. The best results are displayed in bold.
+Datasets FTSR-TE ( ×4) Real-CE-val (Aligned, ×4)
+Methods PSNR ↑ SSIM↑ LPIPS↓ FID↓ OCR-A↑ PSNR↑ SSIM↑ LPIPS↓ FID↓ OCR-A↑
+R-ESRGAN [32] 22.45 0.660 0.299 65.19 0.565 21.59 0.779 0.139 44.03 0.693
+HAT [4] 24.29 0.696 0.299 66.13 0.578 23.05 0.801 0.127 44.50 0.743
+SeeSR [35] 24.32 0.699 0.191 38.10 0.595 22.11 0.753 0.152 43.17 0.218
+SupIR [41] 22.13 0.617 0.283 48.97 0.532 21.04 0.709 0.190 46.77 0.359
+OSEDiff [34] 24.49 0.709 0.169 32.47 0.596 21.15 0.735 0.165 50.21 0.244
+MARCONet [12] 23.03 0.661 0.336 74.59 0.467 22.46 0.784 0.151 46.25 0.638
+DiffTSR [46] 23.59 0.680 0.304 61.65 0.543 21.99 0.777 0.147 47.37 0.582
+Ours 25.49 0.736 0.152 32.13 0.662 24.02 0.829 0.100 38.01 0.882
+3.5 Data Synthesis Pipeline
+To enable multi-task learning for text-aware image super-resolution and text segmentation, a dataset
+consisting of LR images, HR images, and text segmentation maps (xL, xH, s) is required. While
+obtaining LR-HR image pairs is easier by applying the Real-ESRGAN [32] degradation pipeline to
+HR images, acquiring high-quality text segmentation maps is costly in terms of manual annotation.
+Moreover, existing HR image datasets contain insufficient text-rich samples, whereas OCR datasets
+with abundant text suffer from inconsistent data quality due to generalization concerns.
+To solve the dilemma, we propose a data synthesis approach that pastes cropped samples from
+text segmentation datasets onto samples from a high-quality image super-resolution dataset while
+simultaneously merging the corresponding ground-truth text segmentation maps. Due to the limited
+availability of fine-grained text segmentation annotations, we train SAM-TS [40] using the TextSeg
+[37] and BTS [38] datasets to enhance its text segmentation capability. We then apply the trained
+model to infer text segmentation maps for the CTR [3] dataset and filter reliable pseudo-ground-truth
+(pseudo-GT) samples by comparing OCR-based text recognition results between the original images
+and their segmentation maps. Next, a random number of cropped images are pasted onto high-quality
+HR samples from the LSDIR [13] dataset, with the corresponding text segmentation maps placed
+on a zero-initialized image of the same size. To ensure synthesis quality, we filter out CTR samples
+with a small long-edge/character count ratio and super-resolve them with SOTA Real-SR methods
+[4]. Additionally, to avoid label ambiguity, we exclude LSDIR samples that contain text by using an
+OCR-based filtering step. This process results in HR image-text segmentation pairs, which are then
+degraded by the pipeline of Real-ESRGAN [32] to generate LR images, forming the Full-image Text
+image Super-Resolution (FTSR) dataset suitable for joint learning of Real-SR and text segmentation.
+In principle, our data synthesis pipeline can be easily extended to generate plentiful new samples. For
+instance, OCR methods can be used to detect text regions in HR datasets, followed by segmentation
+using SAM-TS. The segmentation results can then be evaluated with OCR to filter accurate samples,
+which can be integrated into the synthesis process. This scalable pipeline facilitates advancements in
+text segmentation under degraded conditions and Real-SR while preserving textual structure.
+4 Experiments
+4.1 Implementation Details
+Dataset Settings.Our training dataset consists of the proposed synthetic dataset FTSR and the real
+paired scene text super-resolution dataset Real-CE [18]. The FTSR dataset contains a total of 50,000
+triplets (xL, xH, s), where the first 45,000 triplets are allocated for training, and the remaining 5,000
+are used for testing. Since some image pairs in the Real-CE dataset are misaligned [46], we manually
+filtered out such samples, resulting in 337 training pairs and 189 testing pairs. In this dataset, images
+captured at a 13mm focal length are used as low-resolution images xL, while those captured at
+a 52mm focal length serve as high-resolution images xH. The text segmentation ground truth is
+obtained by applying SAM-TS inference on the 52mm images.
+Training Details.Our model is built upon the Kolors [26] variant of LDMs and follows a tile-based
+inference strategy similar to SupIR [41]. The diffusion time step t is fixed as 200. We train the model
+6
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 3: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample drawn from the validation dataset of Real-CE [18]. Please note the areas in the boxes.
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 4: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample in real-world scenarios captured in this paper. Please note the areas in the boxes.
+using the PyTorch framework with the AdamW optimizer and a fixed learning rate of 5 × 10−5.
+Training is conducted on four H20 GPUs with a per-GPU batch size of 1 for 200,000 iterations.
+4.2 Performance Evaluation
+As shown in Table 1, we conduct quantitative comparisons between our proposed method and a
+range of state-of-the-art approaches, including GAN-based (R-ESRGAN [32], HAT [4]), diffusion-
+based (SeeSR [35], SupIR [41], OSEDiff [34]), and text-specific super-resolution methods (MAR-
+CONet [12], DiffTSR [46]). For fair comparison, we fine-tune their released pre-trained model on
+FTSR and Real-CE using official training code (if provided). Note that MARCONet and DiffTSR
+are inherently designed for cropped text region super-resolution and exhibit substantial performance
+degradation when directly applied to full-image scenarios. To ensure valid outputs for compari-
+son, we first detect and crop text regions using an OCR model [ 7], then paste their outputs into
+7
+Table 2: Ablation study on different configurations of our proposed design. All models are trained on
+the FTSR training set and evaluated on the FTSR test set.
+Settings PSNR ↑ SSIM↑ LPIPS↓ FID↓ OCR-A↑
+w/o JSD 25.13 0.723 0.161 33.70 0.594
+w/o TACA 25.26 0.722 0.157 32.74 0.617
+w/o MF Loss 25.28 0.729 0.160 32.73 0.629
+Ours 25.49 0.736 0.152 32.13 0.662
+the super-resolved images produced by HAT [4], which preserves non-text fidelity effectively. We
+benchmark all methods on two datasets: the test split of our proposed FTSR dataset (FTSR-TE) and
+the validation set of Real-CE (Real-CE-val), where misaligned LR-HR pairs are manually filtered
+out. All models are evaluated under a 4 × super-resolution setting. We evaluate all methods using
+PSNR, SSIM, LPIPS [45], FID [10], and OCR-based recognition accuracy (OCR-A), providing a
+comprehensive assessment across pixel accuracy, perceptual quality, and text restoration quality.
+For the OCR-A metric, we first detect and recognize text in the GT images using an OCR model,
+preserving the detected bounding boxes. We then extract corresponding regions from the output of
+each competing method for comparison, focusing on the accuracy of text recognition. The similarity
+between the prediction and GT is evaluated using the Levenshtein ratio [ 43], which is defined as
+(Len(rpred) +Len(rgt) − Dist(rpred, rgt))/(Len(rpred) +Len(rgt)), where Len(·) extracts the string
+length, rpred denotes the recognition result of a competing method, rgt represents the recognition
+result in the GT image, and Dist(·, ·) refers to the Levenshtein distance between two strings.
+As can be seen, our proposed TADiSR demonstrates overall superiority across pixel-level, perceptual,
+and text accuracy metrics on both synthetic and real-world datasets. Notably, on the Real-CE dataset,
+TADiSR outperforms the second-best method (HAT) by a large margin of 18.7% in OCR-based
+recognition accuracy (OCR-A), highlighting its exceptional capacity in recovering accurate textual
+content from degraded inputs.
+We further conduct visual comparisons on the Real-CE dataset, as shown in Fig. 3. Due to real-world
+degradations, the input images often exhibit irregular noise, blurred strokes, and stroke adhesions.
+GAN-based methods, while effective at denoising, fail to recover incorrect text structures, leaving
+adhesion artifacts. Diffusion-based generic SR methods, though possessing stronger generative
+capabilities, lack text-aware guidance and thus tend to produce more severe stroke distortions,
+sometimes resulting in completely unrecognizable patterns. Methods tailored for cropped text regions
+(e.g., MARCONet, DiffTSR) show better structure restoration for short texts. However, MARCONet
+enforces a hard limit of 16 tokens per text block. As a result, longer regions are neglected and actually
+reconstructed using HAT (in the red box). Moreover, when OCR guidance is inaccurate, these
+OCR-dependent methods may even generate semantically incorrect characters. DiffTSR, though not
+subject to hard length constraints, performs reliably only for texts shorter than 8 characters, and also
+fails to produce valid results for longer sequences. Both MARCONet and DiffTSR rely on box-wise
+inference and post processing fusion, often introducing visible artifacts at patch boundaries during
+full-image reconstruction. TADiSR effectively avoids the aforementioned pitfalls, making it more
+suitable for practical applications.
+To further evaluate generalization, we collected additional real-world samples using a digital camera.
+As illustrated in Fig. 4, TADiSR delivers comparable super-resolution quality on non-text regions
+while significantly enhancing blurred and adhesive strokes. Moreover, it is worth noting that our
+method effectively avoids the severe performance degradation commonly observed in text image
+super-resolution models when handling vertically arranged text. Addressing this issue in existing
+methods typically requires additional vertical training samples and longer training durations, whereas
+our approach naturally circumvents this limitation. Due to space constraints, we include more visual
+results under various bi-lingual scenarios in the supplementary material for interested readers.
+4.3 Ablation Study
+To verify the effectiveness of our design, we conducted an ablation study, as shown in Table 2 and
+Fig. 5. Specifically, we evaluate three ablated variants: (1) removing the Joint Segmentation Decoders
+(w/o JSD), (2) disabling the Text-Aware Cross-Attention mechanism (w/o TACA), and (3) eliminating
+8
+Input
+ w/o JSD
+ w/o TACA
+ w/o MF
+ Ours
+GT
+ Mask (w/o TACA)
+ Mask (w/o MF)
+ Mask (Ours)
+ Mask (GT)
+Figure 5: Visual results of the ablation study under different configurations. Note the zoom-in regions,
+where our full model achieves more accurate text super-resolution with clearer structural fidelity
+compared to its ablated variants. Predicted text segmentation masks are also provided for reference.
+the modified Focal Loss introduced in Sec. 3.4 (w/o MF Loss). All variants exhibit performance
+degradation to varying degrees, with the w/o JSD model suffering the most significant drop, an
+11.4% decrease in OCR accuracy, alongside declines in pixel fidelity and perceptual metrics. From
+the qualitative results in Fig. 5, we can also observe that removing any of the proposed modules
+weakens the model’s ability to reconstruct accurate text structures. The absence of Joint Segmentation
+Decoders deprives the model of explicit structural supervision, making it to learn text shapes in a
+less guided and inefficient manner. Without Text-Aware Cross-Attention, the predicted segmentation
+masks erroneously highlight irrelevant non-text regions, which misleads the model during training
+and impairs its structural reconstruction ability. The modified Focal Loss, which serves to couple
+the segmentation and super-resolution outputs, encourages the model to focus more on structurally
+ambiguous regions around text strokes. Eliminating this loss leads to noticeably blurrier and less
+well-defined text structures, which also hinders the accuracy of the text segmentation predictions.
+Overall, the ablation results confirm that each component in our framework directly supports better
+text structure restoration. Removing any of them leads to noticeable drops in both visual fidelity and
+quantitative performance, confirming the practical effectiveness of our design choices.
+5 Conclusion
+In this paper, we proposed TADiSR, a text-aware diffusion model designed for real-world image
+super-resolution with joint text segmentation decoding. By finetuning the cross-attention layers
+within the LDM, our approach encourages the model to pay more attention to text-rich regions.
+Furthermore, the introduction of cross-decoder interactions allows structural text information to be
+shared between the super-resolution and segmentation decoding branches, resulting in high-quality
+image outputs with accurate and well-preserved text structures. Extensive experiments on both
+synthetic and real-world datasets demonstrate the overall superiority of our method in terms of both
+quantitative metrics and visual fidelity. There are also several intriguing directions that merit further
+investigation, such as extending cross-attention tuning strategies to other rare semantic categories to
+improve the LDM’s generation accuracy, and developing dedicated diffusion-based text segmentation
+frameworks. Additionally, while TADiSR shows superior performance, there remains significant
+room for improvement, for instance, collecting more real-world paired data across varied focal
+lengths, conducting more precise text segmentation annotations, or incorporating stronger priors
+that explicitly link pure text representations to stylized text appearances could further enhance its
+performance and generalization in real-world scenarios. Overall, our method offers a feasible and
+efficient solution for full-image text-aware super-resolution, and we hope it draws greater attention
+from the community to this practically important but underexplored area.
+9
+References
+[1] Eirikur Agustsson and Radu Timofte. Ntire 2017 challenge on single image super-resolution:
+Dataset and study. In CVPRW, pages 126–135, 2017.
+[2] Jingye Chen, Bin Li, and Xiangyang Xue. Scene text telescope: Text-focused scene image
+super-resolution. In CVPR, pages 12026–12035, 2021.
+[3] Jingye Chen, Haiyang Yu, Jianqi Ma, Mengnan Guan, Xixi Xu, Xiaocong Wang, Shaobo Qu,
+Bin Li, and Xiangyang Xue. Benchmarking chinese text recognition: Datasets, baselines, and
+an empirical study. arXiv preprint, 2021.
+[4] Xiangyu Chen, Xintao Wang, Jiantao Zhou, Yu Qiao, and Chao Dong. Activating more pixels
+in image super-resolution transformer. In CVPR, pages 22367–22377, 2023.
+[5] Chao Dong, Chen Change Loy, Kaiming He, and Xiaoou Tang. Learning a deep convolutional
+network for image super-resolution. In ECCV, pages 184–199, 2014.
+[6] Chao Dong, Ximei Zhu, Yubin Deng, Chen Change Loy, and Yu Qiao. Boosting optical
+character recognition: A super-resolution approach. arXiv preprint, 2015.
+[7] Yuning Du, Chenxia Li, Ruoyu Guo, Xiaoting Yin, Weiwei Liu, Jun Zhou, Yifan Bai, Zilin
+Yu, Yehua Yang, Qingqing Dang, et al. Pp-ocr: A practical ultra lightweight ocr system. arXiv
+preprint, 2020.
+[8] Stefan Elfwing, Eiji Uchibe, and Kenji Doya. Sigmoid-weighted linear units for neural network
+function approximation in reinforcement learning. Neural networks, 107:3–11, 2018.
+[9] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image
+recognition. In CVPR, pages 770–778, 2016.
+[10] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter.
+Gans trained by a two time-scale update rule converge to a local nash equilibrium. NeurIPS, 30,
+2017.
+[11] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang,
+Lu Wang, Weizhu Chen, et al. Lora: Low-rank adaptation of large language models. ICLR,
+page 3, 2022.
+[12] Xiaoming Li, Wangmeng Zuo, and Chen Change Loy. Learning generative structure prior for
+blind text image super-resolution. In CVPR, pages 10103–10113, 2023.
+[13] Yawei Li, Kai Zhang, Jingyun Liang, Jiezhang Cao, Ce Liu, Rui Gong, Yulun Zhang, Hao Tang,
+Yun Liu, Denis Demandolx, et al. Lsdir: A large scale dataset for image restoration. In CVPRW,
+pages 1775–1787, 2023.
+[14] Jie Liang, Hui Zeng, and Lei Zhang. Details or artifacts: A locally discriminative learning
+approach to realistic image super-resolution. In CVPR, pages 5657–5666, 2022.
+[15] Tsung-Yi Lin, Priya Goyal, Ross Girshick, Kaiming He, and Piotr Dollár. Focal loss for dense
+object detection. In ICCV, pages 2980–2988, 2017.
+[16] Xinqi Lin, Jingwen He, Ziyan Chen, Zhaoyang Lyu, Bo Dai, Fanghua Yu, Yu Qiao, Wanli
+Ouyang, and Chao Dong. Diffbir: Toward blind image restoration with generative diffusion
+prior. In ECCV, pages 430–448, 2024.
+[17] Cheng Ma, Yongming Rao, Jiwen Lu, and Jie Zhou. Structure-preserving image super-resolution.
+TPAMI, 44(11):7898–7911, 2021.
+[18] Jianqi Ma, Zhetong Liang, Wangmeng Xiang, Xi Yang, and Lei Zhang. A benchmark for
+chinese-english scene text image super-resolution. In ICCV, pages 19452–19461, 2023.
+[19] Jianqi Ma, Zhetong Liang, and Lei Zhang. A text attention network for spatial deformation
+robust scene text image super-resolution. In CVPR, pages 5911–5920, 2022.
+10
+[20] Yongqiang Mou, Lei Tan, Hui Yang, Jingying Chen, Leyuan Liu, Rui Yan, and Yaohong Huang.
+Plugnet: Degradation aware scene text recognition supervised by a pluggable super-resolution
+unit. In ECCV, pages 158–174, 2020.
+[21] JoonKyu Park, Sanghyun Son, and Kyoung Mu Lee. Content-aware local gan for photo-realistic
+super-resolution. In ICCV, pages 10585–10594, 2023.
+[22] Richard A Roberts and Clifford T Mullis. Digital signal processing. Addison-Wesley Longman
+Publishing Co., Inc., 1987.
+[23] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-
+resolution image synthesis with latent diffusion models. In CVPR, pages 10684–10695, 2022.
+[24] Noam Shazeer. Glu variants improve transformer. arXiv preprint, 2020.
+[25] Raphael Tang, Linqing Liu, Akshat Pandey, Zhiying Jiang, Gefei Yang, Karun Kumar, Pontus
+Stenetorp, Jimmy Lin, and Ferhan Ture. What the daam: Interpreting stable diffusion using
+cross attention. In Computational Linguistics, 2023.
+[26] Kolors Team. Kolors: Effective training of diffusion model for photorealistic text-to-image
+synthesis. arXiv preprint, 2024.
+[27] Radu Timofte, Eirikur Agustsson, Luc Van Gool, Ming-Hsuan Yang, and Lei Zhang. Ntire 2017
+challenge on single image super-resolution: Methods and results. In CVPRW, pages 114–125,
+2017.
+[28] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. NeurIPS, 30, 2017.
+[29] Jianyi Wang, Zongsheng Yue, Shangchen Zhou, Kelvin CK Chan, and Chen Change Loy.
+Exploiting diffusion prior for real-world image super-resolution. IJCV, 132(12):5929–5949,
+2024.
+[30] Wenjia Wang, Enze Xie, Xuebo Liu, Wenhai Wang, Ding Liang, Chunhua Shen, and Xiang Bai.
+Scene text image super-resolution in the wild. In ECCV, pages 650–666, 2020.
+[31] Wenjia Wang, Enze Xie, Peize Sun, Wenhai Wang, Lixun Tian, Chunhua Shen, and Ping Luo.
+Textsr: Content-aware text super-resolution guided by recognition. arXiv preprint, 2019.
+[32] Xintao Wang, Liangbin Xie, Chao Dong, and Ying Shan. Real-esrgan: Training real-world
+blind super-resolution with pure synthetic data. In ICCV, pages 1905–1914, 2021.
+[33] Yufei Wang, Wenhan Yang, Xinyuan Chen, Yaohui Wang, Lanqing Guo, Lap-Pui Chau, Ziwei
+Liu, Yu Qiao, Alex C Kot, and Bihan Wen. Sinsr: diffusion-based image super-resolution in a
+single step. In CVPR, pages 25796–25805, 2024.
+[34] Rongyuan Wu, Lingchen Sun, Zhiyuan Ma, and Lei Zhang. One-step effective diffusion network
+for real-world image super-resolution. NeurIPS, 37:92529–92553, 2024.
+[35] Rongyuan Wu, Tao Yang, Lingchen Sun, Zhengqiang Zhang, Shuai Li, and Lei Zhang. Seesr:
+Towards semantics-aware real-world image super-resolution. In CVPR, pages 25456–25467,
+2024.
+[36] Yuxin Wu and Kaiming He. Group normalization. In ECCV, pages 3–19, 2018.
+[37] Xingqian Xu, Zhifei Zhang, Zhaowen Wang, Brian Price, Zhonghao Wang, and Humphrey
+Shi. Rethinking text segmentation: A novel dataset and a text-specific refinement approach. In
+CVPR, pages 12045–12055, 2021.
+[38] Xixi Xu, Zhongang Qi, Jianqi Ma, Honglun Zhang, Ying Shan, and Xiaohu Qie. Bts: a
+bi-lingual benchmark for text segmentation in the wild. In CVPR, pages 19152–19162, 2022.
+[39] Tao Yang, Rongyuan Wu, Peiran Ren, Xuansong Xie, and Lei Zhang. Pixel-aware stable
+diffusion for realistic image super-resolution and personalized stylization. In ECCV, pages
+74–91, 2024.
+11
+[40] Maoyuan Ye, Jing Zhang, Juhua Liu, Chenyu Liu, Baocai Yin, Cong Liu, Bo Du, and Dacheng
+Tao. Hi-sam: Marrying segment anything model for hierarchical text segmentation. TPAMI,
+2024.
+[41] Fanghua Yu, Jinjin Gu, Zheyuan Li, Jinfan Hu, Xiangtao Kong, Xintao Wang, Jingwen He,
+Yu Qiao, and Chao Dong. Scaling up to excellence: Practicing model scaling for photo-realistic
+image restoration in the wild. In CVPR, pages 25669–25680, 2024.
+[42] Zongsheng Yue, Jianyi Wang, and Chen Change Loy. Resshift: Efficient diffusion model for
+image super-resolution by residual shifting. NeurIPS, 36:13294–13307, 2023.
+[43] Li Yujian and Liu Bo. A normalized levenshtein distance metric. TPAMI, 29(6):1091–1095,
+2007.
+[44] Kai Zhang, Jingyun Liang, Luc Van Gool, and Radu Timofte. Designing a practical degradation
+model for deep blind image super-resolution. In ICCV, pages 4791–4800, 2021.
+[45] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The un-
+reasonable effectiveness of deep features as a perceptual metric. In CVPR, pages 586–595,
+2018.
+[46] Yuzhe Zhang, Jiawei Zhang, Hao Li, Zhouxia Wang, Luwei Hou, Dongqing Zou, and Liheng
+Bian. Diffusion-based blind text image super-resolution. In CVPR, pages 25827–25836, 2024.
+12
+A FTSR Synthetic Dataset Visualization
+To further illustrate the construction and diversity of our proposed dataset FTSR, we present several
+example triplets (xL, xH, s) in Fig. 6. Our proposed synthesis pipeline allows for free composition
+between background images and foreground text regions. Moreover, we leverage existing text
+segmentation dataset samples to further train a text segmentation model, which is then used to infer
+on large-scale text recognition datasets. We thereby extract a substantial number of text region images
+with accurate segmentation masks using OCR-based filtering method. As a result, the samples feature
+rich and varied background contexts, diverse font styles, and accurate pixel-level text segmentation
+masks, offering supervision for joint learning of super-resolution and segmentation tasks.
+B Text Segmentation Comparison
+In Fig. 7, we provide a qualitative comparison between our TADiSR model and a state-of-the-art
+segmentation method Hi-SAM on real-world degraded samples collected in this paper by a digital
+camera. Despite that part of our training segmentation labels were selected from Hi-SAM outputs, our
+model still delivers significantly finer and more precise segmentation results than those of Hi-SAM
+across varied scenes. This highlights the strong mutual benefits between text-aware super-resolution
+and text segmentation tasks, and further validates the effectiveness of our joint learning strategy.
+C Extended Visual Comparisons on Real-World Samples
+We provide additional visual comparisons between our method and previous state-of-the-art ap-
+proaches in Figs. 8–11, using real-world samples collected in this paper in the wild. To compre-
+hensively assess the generalization capabilities of each method, the examples span diverse and
+challenging scenarios including overexposed neon signs at night, long horizontal text, vertically
+engraved characters, and handwritten text. In Fig. 8, overexposure leads to severe character merging
+in neon signs, a situation where existing methods struggle to recover legible text. In contrast, our
+method successfully reconstructs distinct character structures, also showing superior performance on
+small-scale text. Fig. 9 illustrates results on long horizontal text. While GAN-based models largely
+preserve structure but fail to enhance quality, diffusion-based generic SR methods introduce structural
+distortions due to lack of text awareness. MARCONet [12] fails to generate valid outputs on long
+text due to its hard length constraint, with most content falling back to HAT outputs. Similarly,
+DiffTSR [46] struggles with long sequences, and even in valid predictions (green boxes), character
+sticking occurs. Our model, however, improves visual quality while maintaining accurate character
+shapes throughout. In Fig. 10, which contains vertically engraved characters, both GAN and generic
+diffusion methods suffer from reduced legibility and structural distortions. Text image SR methods
+generally fail due to the vertical layout. Our method, benefiting from global text-awareness, produces
+sharp and coherent results, enhancing faint strokes. For handwritten text in Fig. 11, other methods
+result in missing or merged strokes, while our approach accurately reconstructs the undermined
+handwritten structure. Additionally, we present more results on the Real-CE dataset in Figs. 12
+and 13, which focus on text-rich scenarios like poster and book covers. Our model consistently
+restores fused strokes and outputs structurally accurate super-resolved results, even for fine-grained
+characters.
+D Limitation Analysis
+As illustrated in Fig. 14, we showcase a challenging example from the Real-CE dataset. In our result,
+the character highlighted by the red circle exhibits a structural discrepancy when compared with
+the ground truth. This particular character has a high stroke density, and in the input image, the
+strokes are heavily fused due to real-world degradation, making it difficult to visually discern the
+original structure—even for a human observer. Consequently, all methods, including text image
+super-resolution approaches (within their limitation of text length), fail to predict the correct structure
+of this character. Future work could explore interactive strategies such as text mask editing or
+user-guided correction to address such hard cases. Nonetheless, it is worth emphasizing that apart
+from this one character, our method consistently outperforms previous approaches across the rest of
+the bilingual text in the image, producing clearer and more accurate structural reconstructions.
+13
+LR
+ HR
+ Mask
+ LR
+ HR
+ Mask
+Figure 6: Sample triplets from our FTSR dataset, including low-resolution inputs (LR), high-
+resolution references (HR), and ground truth segmentation masks (Mask).
+Input
+ Ours-SR
+ Ours-Mask
+ Hi-SAM [40]
+Figure 7: Text segmentation comparison between TADiSR and Hi-SAM [40] on real-world degraded
+cases, including carved, handwritten, and long printed text. Our results are noticeably finer and more
+accurate than those of the dedicated text segmentation model Hi-SAM.
+14
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 8: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample in real-world scenarios captured in this paper. Please note the areas in the boxes.
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 9: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample in real-world scenarios captured in this paper. Please note the areas in the boxes.
+15
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 10: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample in real-world scenarios captured in this paper. Please note the areas in the boxes.
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 11: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample in real-world scenarios captured in this paper. Please note the areas in the boxes.
+16
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 12: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample drawn from the validation dataset of Real-CE [18]. Please note the areas in the boxes.
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 13: Visual comparison of super-resolution results between previous state-of-the-arts and ours
+on a sample drawn from the validation dataset of Real-CE [18]. Please note the areas in the boxes.
+17
+Input
+ R-ESRGAN [32]
+ HAT [4]
+ SeeSR [35]
+ SupIR [41]
+OSEDiff [34]
+ MARCONet [12]
+ DiffTSR [46]
+ Ours
+ GT
+Figure 14: A case from the Real-CE dataset showing our limitation. The character highlighted by
+the red circle shows structure deviation due to extreme stroke fusion, while other characters are well
+reconstructed by our method.
+18

@@ -1,0 +1,94 @@
+# Bounded de-risk: continue-train the 0.5B multi-step text teacher on Real-CE
+# REAL pairs (13mm->52mm) to test whether the teacher can learn the real-degradation
+# domain at all (gate before investing in proper SA+Real-CE mixed-batch training).
+# Init = the existing teacher ckpt-40000 (NOT VOSR_0.5B_ms).
+train_dataset_config: configs/train_txt/realce_mix_dataset.txt
+suffix: '_text_hr_realce_mix'
+
+# Use the registered real 13mm LQ sharing the 52mm GT filename (replay same crop,
+# skip synthetic degradation). train_vosr.py patched to consume batch["lq"].
+real_paired_lq_dir: /data/ywk/datasets/Real-CE/curation/realce_tiles/lr
+
+test_lq_dir: /data/ywk/datasets/real_test/LQ
+test_gt_dir: /data/ywk/datasets/real_test/HR
+test_upscale: 4
+
+infer_steps: 25
+resolution: 512
+
+train_batch_size: 4
+gradient_accumulation_steps: 2
+dataloader_num_workers: 4
+
+patch_size: 2
+mlp_ratio: 4
+use_qknorm: True
+use_swiglu: True
+use_rope: True
+use_rmsnorm: True
+wo_shift: False
+
+dim: 1024
+depth: 28
+num_heads: 16
+
+use_8bit_adam: False
+
+ae_type: sd2
+ae_path: preset/ckpts/stable-diffusion-2-1-base
+lwdecoder_path: preset/ckpts/sd21_lwdecoder.pth
+
+# Short de-risk run. LR slightly above teacher's 1e-5 to see movement in few steps.
+learning_rate: 1.0e-5
+max_train_steps: 20000
+checkpointing_steps: 2000
+inference_steps: 1
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_weight_decay: 1.0e-2
+adam_epsilon: 1.0e-08
+max_grad_norm: 1.0
+lr_scheduler: constant_with_warmup
+lr_warmup_steps: 0
+lr_num_cycles: 1
+use_ema: True
+mixed_precision: bf16
+tracker_project_name: vosr_text_0.5B_realce_mix
+seed: 42
+ema_decay: 0.9999
+
+time_dist: ['uniform', 0, 1.0]
+
+cfg_ratio: 0.1
+cfg_scale: 0.5
+
+weak_cond_strength_aelq_list: [0.05, 0.25]
+cond_strength_aelq_list: [5, 1]
+
+dinov2_size: 448
+enc_type: dinov2b
+enc_dim: 768
+layer_dinov2b_list: [8]
+
+interp_type: lin
+
+a: 1.0
+b: 1.0
+
+use_pos: False
+train_steps: 2
+encdim_ratio: 3
+t_start: 0
+t_end: 1
+
+resume_ckpt: ~
+# Continue from the existing multi-step teacher (ckpt-40000 EMA), not VOSR_0.5B_ms.
+pretrained_ckpt: exp_vosr_text/ldit_fm_bs008_sd2f8c4_size512_ps2_d1024_b28_h16_cfgs0.5-r0.1-wc0.05-0.25_edr3_tduni_typetxt_text_hr/checkpoints/checkpoint-00040000/clean_weights/ema_model.safetensors
+
+logging_dir: logs
+output_dir: exp_vosr_text/
+report_to: tensorboard
+log_loss_steps: 10
+
+dataset_type: 'txt'
+shuffle_buffer: 2000
