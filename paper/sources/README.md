@@ -30,6 +30,7 @@
 |---|---|---|
 | `TEXTS-Diff_2601.17340.pdf` | TEXTS-Diff: TEXTS-Aware Diffusion for Real-World Text SR (ICASSP26) | **已是一步文本SR(OSEDiff式)**→冲击C1;识别口径=PP-OCRv5整行匹配(同我们协议①);投稿时未开源故不对比,Related Work点名 |
 | `DiffTSR_2312.08886.pdf` | Diffusion-based Blind Text Image SR (CVPR24) | **开源(权重+推理+训练)**;但**行级STISR形态**(≤24字/128×512),与我们整图形态不同;Real-CE用TransOCR/1531裁剪对 |
+| `PRISM_2605.13027.pdf` | PRISM: Prior Rectification and Uncertainty-Aware Structure Modeling for Diffusion-Based Text Image SR (2026-05) | **最新行级/Text-line 单步扩散 Text-SR**；不作为整图主对比，但其 BTL 数据构造、RealCE-val clean split、PP-OCRv5 ACC/NED、TeReDiff 负例、privileged prior + uncertainty structure 设计对我们 Real-CE 诊断和训练改动有参考价值 |
 
 ### 直接竞品 / 方法根基
 | 文件 | 论文 | 关系 |
