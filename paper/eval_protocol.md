@@ -29,6 +29,21 @@
 3. **"OCR-A"三家口径都不同**：Levenshtein(TADiSR/TIGER) vs 精确匹配(TEXTS-Diff)；OCR-of-HR(TADiSR) vs 标注(TIGER/TEXTS-Diff) → 数不可比(即 0.882 vs 64.7 之谜根源)，正是 UTEP 的 motivation。
 4. **白送证据**：TIGER Table 3 已证 SeeSR/OSEDiff/SupIR/DiffBIR/DiffTSR 在 Real-CE 上 ΔOCR-A 全负；TEXTS-Diff 在 **Real-Texts(=847)** 上用 PP-OCRv5 报 OCR-A，与我们 L2 最可对齐。
 
+## 0.8 完全复现 TAIR 评测矩阵（用户要求 2026-06-27：每种 eval 方式都测，不止每个模型）
+> 目标：把 TAIR 论文用到的**所有评测轴**都跑一遍（同管线自评），其 published 数即逐项对标靶（credibility）。
+> 出处：TAIR Table 2(SA-Text spotting)/Table 3(Real-Text spotting)/Table 4(IQA)；§5.1 Evaluation metrics。
+
+**完整矩阵（数据集 × spotter × 指标）：**
+- **数据集(2)**：① **SA-Text test 1K**，**三退化等级 Lv1/Lv2/Lv3**(Table 2，注:我方 SA-Text 训练污染,带声明,与 TAIR 同口径参考)；② **Real-Text 847**(Table 3)。
+- **Spotter(2,每行都报两套)**：**① ABCNet v2 [56]** + **② TESTR [101]**。← **当前只做了 TESTR，必须补 ABCNet v2**。
+- **检测指标**：Precision / Recall / **F1-Score**。
+- **端到端**：**None**(无词表) + **Full**(全词表)。
+- **IQA(Table 4)**：参照 **PSNR/SSIM/LPIPS/DISTS/FID** + 无参照 **NIQE/MANIQA/MUSIQ/CLIPIQA**。
+
+**对标靶(TAIR published，自评须逼近)**：Table 2/3 给了每个 baseline×等级×两 spotter 的全部数；如 Real-Text TESTR: DiffBIR det 68.35/E2E None 39.27、SeeSR 67.87/40.34、FaithDiff 70.57/41.64、TeReDiff 74.89/49.39；ABCNet v2 列亦全。**我们 re-run 这些 baseline 后两套 spotter 都要对得上**。
+
+**实现增量(在 §1/§3 基础上要补)**：① 新增 **ABCNet v2** spotter 管线(AdelaiDet,需 env+权重)；② spotting 出 **P/R/F1 + None/Full** 完整列(不只 F1)；③ IQA 补齐 **DISTS/FID/MANIQA/CLIPIQA**；④ 数据集覆盖 **SA-Text 3 级 + Real-Text**(+ 我们扩展的 Real-CE 跨域)。详 `ToDoExp/05`。
+
 ## 1. 三层任务解耦（核心设计，全报，禁止只挑一层）
 > 2026-06-27 用户定：纳入 **L1 + L2 + IQA**；不单列 L3 参照式 OCR-A（统一走 L2 区域识别，需 GT 转写）。
 

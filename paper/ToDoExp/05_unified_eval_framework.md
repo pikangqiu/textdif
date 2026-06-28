@@ -30,7 +30,15 @@
 - `delta_ocr.py`：先对 **bicubic-LR 输入**跑 L2(+L1)，再 `ΔOCR = SR − LR`。
 - `aggregate.py`：出主表（NFE | det F1 | E2E None/Full | CharAcc | **ΔOCR** | PSNR/SSIM/LPIPS/FID）。
 
-## Part C — 可信度背书：复现 TAIR Table 3
+## Part B2 — 完全复现 TAIR 评测矩阵（用户 2026-06-27：每种 eval 方式都测）
+详 `../eval_protocol.md` §0.8。增量：
+- **新增 ABCNet v2 spotter**（AdelaiDet）：独立 env + 权重；出 Det P/R/F1 + E2E None/Full。脚本 `protocol/l1_abcnetv2.py`。与现 TESTR 并列，每行两套都报。
+- **spotting 完整列**：P/R/F1 + None/Full（不只 F1）。
+- **IQA 补齐**：在 `iqa.py` 加 DISTS/FID/MANIQA/CLIPIQA（现 PSNR/SSIM/LPIPS 之外）。
+- **数据集覆盖**：SA-Text test **Lv1/Lv2/Lv3**(带污染声明) + Real-Text 847 + Real-CE(跨域,我们扩展)。SA-Text 我方已有三级 LQ/HQ/mask(见 result_exp.md SA-Text 节)。
+- 验收靶：TAIR Table 2/3 的 ABCNet v2 + TESTR 两套 published 数。
+
+## Part C — 可信度背书：复现 TAIR Table 2/3（两 spotter）
 - 4 baseline 在我们管线下的 `det F1 / E2E None` 与 TAIR Table 3 published 对拍：
   - 参照（TAIR Table 3，TESTR）：DiffBIR 68.35/39.27、SeeSR 67.87/40.34、FaithDiff 70.57/41.64、SUPIR 48.39/27.25。
 - **验收**：我们 re-run ≈ published（容差内）→ 管线中立可信，UTEP 立得住。对不上则先排查（输入口径/spotter config/权重版本），排查记录进台账。
