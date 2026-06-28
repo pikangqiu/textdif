@@ -353,8 +353,9 @@ Real-CE 必须克制：
 2. 精读 TEXTS-Diff：重点确认 one-step 训练、PP-OCRv5 OCR-A 定义、Real-Texts/Real-CE 数据构成，避免 C1 表述踩雷。
 3. 精读 TIGER：确认 Delta OCR-A、region IQA、baseline grouping 的表注，C4 必须 credit。
 4. 精读 TADiSR：确认 Real-CE 189 子集、OCR-of-HR 或 GT reference、单步设置和 JSD/seg decoder 的 contribution 写法。
-5. 精读 Real-CE：确认官方 ACC/NED、test split、line transcription、TextZoom limitation 的原文证据。
-6. 实验上优先补 frozen eval 的脚本和输出，而不是扩 baseline 数量。story 现在缺的不是更多方法名，而是同口径证据。
+5. 精读 PRISM：确认它的 text-line 任务边界、BTL 数据构造、RealCE-val clean split、PP-OCRv5 ACC/NED、TeReDiff 负例，以及 FMPR/SURE 对我们 training-time prior 和局部结构监督的启发。详见 `PRISM_reading_notes.md`。
+6. 精读 Real-CE：确认官方 ACC/NED、test split、line transcription、TextZoom limitation 的原文证据。
+7. 实验上优先补 frozen eval 的脚本和输出，而不是扩 baseline 数量。story 现在缺的不是更多方法名，而是同口径证据。
 
 ---
 
